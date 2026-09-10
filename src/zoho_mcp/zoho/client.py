@@ -1911,8 +1911,26 @@ class ZohoClient:
             ZohoAPIError: if no recipient is given, or the Zoho Mail API
                 rejects or fails the request.
         """
+        # mailFormat="plaintext" is load-bearing, not decorative. Zoho
+        # defaults an omitted mailFormat to "html", but every caller of
+        # this tool authors content as plain text with bare "\n" line
+        # breaks -- which HTML collapses (a bare newline is not markup).
+        # Confirmed live 2026-09-10: an omitted mailFormat produced
+        # multipart/alternative whose text/html part contained the raw
+        # "\n\n" characters verbatim with no <p>/<br>, rendering as one
+        # run-on paragraph in the recipient's client -- see
+        # dashboard/incidents.json in Monarc-Operations for the report
+        # that traced it here. mailFormat="plaintext" makes Zoho emit a
+        # single text/plain part instead, where "\n" is a real line break
+        # to every consumer. Never omit this.
         return await self._compose(
-            to=to, subject=subject, content=content, cc=cc, bcc=bcc, as_draft=True
+            to=to,
+            subject=subject,
+            content=content,
+            cc=cc,
+            bcc=bcc,
+            as_draft=True,
+            mail_format="plaintext",
         )
 
     async def send_email(
@@ -1964,8 +1982,20 @@ class ZohoClient:
                 rejects or fails the request.
         """
         if not self._allow_auto_send:
+            # mail_format="plaintext": same defect and same fix as
+            # create_draft (see that method's docstring) -- this gated
+            # fallback still calls _compose with as_draft=True, so it
+            # needs the identical fix or every send_email call made while
+            # auto-send is off (i.e. every call, on the current default
+            # config) produces the same collapsed-paragraph draft.
             drafted = await self._compose(
-                to=to, subject=subject, content=content, cc=cc, bcc=bcc, as_draft=True
+                to=to,
+                subject=subject,
+                content=content,
+                cc=cc,
+                bcc=bcc,
+                as_draft=True,
+                mail_format="plaintext",
             )
             return {
                 **drafted,
@@ -2020,6 +2050,12 @@ class ZohoClient:
             "content": content,
             "action": "replyall" if reply_all else "reply",
             "mode": "draft",  # never remove: without it Zoho sends the reply
+            # mailFormat="plaintext": same defect and fix as create_draft
+            # (see that method's docstring) -- confirmed live 2026-09-10
+            # that an omitted mailFormat here produces the identical
+            # collapsed-paragraph bug in the new reply text (the quoted
+            # original still renders correctly either way).
+            "mailFormat": "plaintext",
         }
         account_id = await self._get_account_id()
         payload = await self._post(

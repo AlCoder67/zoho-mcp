@@ -337,6 +337,38 @@ shared builder, and tests assert `sent["mode"] == "draft"`. **Do not remove
 those assertions** — they're the guard against a refactor silently mailing
 strangers.
 
+### An omitted `mailFormat` defaults to html, and a plain-text `content` string doesn't survive that
+
+Confirmed live 2026-09-10. Zoho's compose endpoint documents `mailFormat` as
+optional, defaulting to `"html"` when absent. `create_draft`, `reply_draft`,
+and `send_email`'s gated draft fallback all pass a plain Python string
+containing bare `"\n"` line breaks as `content` — the natural way to author a
+multi-paragraph email in code. With `mailFormat` omitted, Zoho wraps that
+string in a `text/html` part completely unchanged: the literal `\n\n`
+characters land in the HTML source with no `<br>`/`<p>` around them, and a
+bare newline carries no meaning in HTML. Every paragraph break collapses,
+and the whole body renders as one run-on line in any real mail client
+(reported first as a Zoho Mail compose-view screenshot showing exactly
+this). Verified via a live `get_email_source(include_raw=True)` call on a
+throwaway draft: the `text/html` part read `Line one.\n\nLine two.` verbatim,
+and the auto-generated `text/plain` alternative had already flattened it to
+`Line one. Line two.` with no separator at all — proof the collapse happens
+Zoho-side, not in any client's rendering.
+
+Fix: pass `mailFormat: "plaintext"` explicitly on every one of those three
+call sites. Re-verified live with the same throwaway-draft method: the
+response becomes a single `text/plain` part (no `multipart/alternative`
+split at all), and `\n` in the source is a real line break to every
+consumer. This is the opposite of `forward_draft`'s situation two sections
+below (`mailFormat: "html"`, real markup) — the two composition
+paths hand Zoho genuinely different content shapes, and each needs the
+`mailFormat` that matches what it's actually sending, not a shared default.
+`send_email`'s *real* send path (`ZOHO_ALLOW_AUTO_SEND` on) is unaffected:
+`agents/6-scheduler.md` (Monarc-Operations) always calls it with
+`mailFormat: "html"` and real hand-composed `<p>` markup for the outgoing
+message, never a plain string — so this defect only ever reached the
+drafts a human reviews before sending, not anything that went out live.
+
 ### One endpoint handles all message-state changes
 
 `PUT .../updatemessage` covers mark read/unread, move, and label add/remove,

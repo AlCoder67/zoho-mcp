@@ -3049,10 +3049,30 @@ async def test_create_draft_builds_the_expected_payload(respx_mock, zoho_client)
         "toAddress": "a@example.com,b@example.com",
         "subject": "Hi",
         "content": "Body",
+        "mailFormat": "plaintext",
         "ccAddress": "c@example.com",
         "bccAddress": "d@example.com",
     }
     assert result == {"id": "msg-new-1"}
+
+
+async def test_create_draft_always_sets_mail_format_plaintext(respx_mock, zoho_client):
+    # Zoho's compose endpoint defaults mailFormat to "html" when omitted,
+    # and every draft/reply body here is authored as plain text with bare
+    # "\n" line breaks -- which HTML collapses into one run-on line (bare
+    # newlines carry no meaning outside a <br>/<p> tag). Confirmed live
+    # 2026-09-10: an omitted mailFormat produced multipart/alternative with
+    # a text/html part containing literal "\n\n" sequences with no markup,
+    # which Zoho Mail's own compose view renders as a single wall of text
+    # (see dashboard/incidents.json). Passing mailFormat="plaintext"
+    # produces a single text/plain part instead, where "\n" is a real line
+    # break to every consumer. Never omit this on create_draft/reply_draft.
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(to=["a@example.com"], subject="Hi", content="B")
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["mailFormat"] == "plaintext"
 
 
 async def test_create_draft_omits_cc_and_bcc_when_not_given(respx_mock, zoho_client):
@@ -3321,7 +3341,44 @@ async def test_reply_draft_sets_both_action_reply_and_mode_draft(
     assert sent["action"] == "reply"
     assert sent["mode"] == "draft"  # never remove: without it Zoho SENDS
     assert sent["content"] == "Sure thing"
+    assert sent["mailFormat"] == "plaintext"
     assert result == {"id": "msg-reply-1"}
+
+
+async def test_reply_draft_always_sets_mail_format_plaintext(respx_mock, zoho_client):
+    # Same defect as create_draft (see test_create_draft_always_sets_mail_
+    # format_plaintext): confirmed live 2026-09-10 that an omitted
+    # mailFormat on a reply produces multipart/alternative with bare "\n"
+    # in the html part, collapsing every paragraph break in the reply body
+    # (the quoted original still renders fine either way; only the new
+    # reply text on top is affected). mailFormat="plaintext" fixes it by
+    # making Zoho emit a single text/plain part instead.
+    respx_mock.get("https://mail.zoho.com/api/accounts").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "accountId": ACCOUNT_ID,
+                        "isDefaultAccount": True,
+                        "timeZone": "America/Los_Angeles",
+                        "primaryEmailAddress": "personal@example.com",
+                        "mailboxAddress": "me@example.com",
+                    }
+                ]
+            },
+        )
+    )
+    route = respx_mock.post(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/m-1"
+    ).mock(
+        return_value=httpx.Response(200, json={"data": {"messageId": "msg-reply-2"}})
+    )
+
+    await zoho_client.reply_draft(message_id="m-1", content="Sure thing")
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["mailFormat"] == "plaintext"
 
 
 async def test_reply_draft_uses_reply_all_action_when_asked(respx_mock, zoho_client):
