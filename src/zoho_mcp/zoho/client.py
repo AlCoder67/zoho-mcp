@@ -9,7 +9,6 @@ import email.header
 import email.parser
 import html
 import json
-import re
 import urllib.parse
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -413,11 +412,25 @@ def _plaintext_to_safe_html(content: str) -> str:
     function is the one place that gap gets closed, so no caller has to
     remember to do it themselves.
 
+    **Every line is its own paragraph.** This module's real callers
+    (Monarc's outreach drafts, verified live 2026-09-14) never author a
+    blank line anywhere -- every logical point, however short, sits on
+    its own single "\\n"-terminated line, with no "\\n\\n" ever appearing
+    in practice. An earlier version of this function treated only
+    "\\n\\n" as a paragraph break and a lone "\\n" as a same-paragraph
+    ``<br>``, which is the right rule for prose that's been manually
+    soft-wrapped -- but against this system's actual one-line-per-point
+    authoring style it collapsed the entire message into a single ``<p>``
+    with no margin anywhere, reported live as "no line breaks where
+    they're supposed to be" (screenshots showed every sentence flush
+    together with zero paragraph spacing). Every non-blank line now gets
+    its own ``<p>``, which matches how these drafts are actually written
+    and gives each line real vertical spacing -- consecutive blank lines
+    collapse rather than producing empty ``<p></p>`` artifacts.
+
     Escapes the input first (``html.escape``), so this never emits a
     caller-controlled tag -- the only markup in the output is the
-    paragraph/``<br>`` structure this function itself adds. Blank lines
-    (two or more consecutive "\\n") become paragraph breaks; a single
-    "\\n" inside a paragraph becomes ``<br>``.
+    ``<p>`` structure this function itself adds.
 
     Args:
         content: plain text, exactly as authored for the plaintext path.
@@ -426,12 +439,8 @@ def _plaintext_to_safe_html(content: str) -> str:
         An HTML fragment safe to pass as ``mail_format="html"`` content.
     """
     escaped = html.escape(content)
-    paragraphs = re.split(r"\n{2,}", escaped)
-    return "".join(
-        f"<p>{paragraph.replace(chr(10), '<br>')}</p>"
-        for paragraph in paragraphs
-        if paragraph.strip()
-    )
+    lines = escaped.split("\n")
+    return "".join(f"<p>{line}</p>" for line in lines if line.strip())
 
 
 def _add_optional_recipients(

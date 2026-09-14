@@ -3130,22 +3130,24 @@ async def test_create_draft_rich_text_sets_mail_format_html(respx_mock, zoho_cli
 
 
 async def test_create_draft_rich_text_converts_bare_newlines(respx_mock, zoho_client):
-    # This is the regression the 2026-09-10 fix exists to prevent, in the
-    # new rich_text path: a bare "\n" sent as html content with no <br>
-    # collapses in the recipient's client. Assert the actual HTML markup
-    # is present, not just that mailFormat says "html".
+    # Every "\n" is its own paragraph -- confirmed live 2026-09-14 that
+    # real Monarc drafts never contain a blank line, so treating only
+    # "\n\n" as a paragraph break collapsed the whole message into one
+    # <p> with no visible spacing (reported live via screenshot as "no
+    # line breaks where they're supposed to be"). Assert real per-line
+    # <p> markup, not just that mailFormat says "html".
     route = mock_compose_endpoints(respx_mock)
 
     await zoho_client.create_draft(
         to=["a@example.com"],
         subject="Hi",
-        content="Paragraph one line one\nParagraph one line two\n\nParagraph two",
+        content="Line one\nLine two\nLine three",
         rich_text=True,
     )
 
     sent = json.loads(route.calls.last.request.content)
-    assert "<br>" in sent["content"]
-    assert sent["content"].count("<p>") == 2
+    assert sent["content"].count("<p>") == 3
+    assert "<br>" not in sent["content"]
 
 
 async def test_create_draft_rich_text_escapes_content(respx_mock, zoho_client):
@@ -3467,7 +3469,7 @@ async def test_reply_draft_rich_text_sets_mail_format_html(respx_mock, zoho_clie
     )
 
     await zoho_client.reply_draft(
-        message_id="m-1", content="Line one\n\nLine two", rich_text=True
+        message_id="m-1", content="Line one\nLine two", rich_text=True
     )
 
     sent = json.loads(route.calls.last.request.content)
