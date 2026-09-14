@@ -3150,6 +3150,53 @@ async def test_create_draft_rich_text_converts_bare_newlines(respx_mock, zoho_cl
     assert "<br>" not in sent["content"]
 
 
+async def test_create_draft_rich_text_keeps_signature_lines_together(
+    respx_mock, zoho_client
+):
+    # Reported live 2026-09-14: "Name | Company" and the bare domain line
+    # right after it must render directly under each other, like a real
+    # signature block, not as two separate paragraphs with a gap between
+    # them. Detected generically (line with "|", then a bare-hostname-
+    # shaped line), not hardcoded to this exact name/domain.
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(
+        to=["a@example.com"],
+        subject="Hi",
+        content="Body line.\nOfentse Shuping | Monarc Media\nmonarcmediahq.com",
+        rich_text=True,
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["content"] == (
+        "<p>Body line.</p>"
+        "<p>Ofentse Shuping | Monarc Media<br>monarcmediahq.com</p>"
+    )
+
+
+async def test_create_draft_rich_text_does_not_pair_unrelated_lines(
+    respx_mock, zoho_client
+):
+    # The signature-pair rule must not fire on an ordinary line that
+    # merely contains "|" without a following bare-domain-shaped line --
+    # e.g. a script description using "|" as a separator, immediately
+    # followed by an ordinary sentence, not a domain.
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(
+        to=["a@example.com"],
+        subject="Hi",
+        content="Format: TikTok | Meta feed\nTone: casual, direct",
+        rich_text=True,
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["content"] == (
+        "<p>Format: TikTok | Meta feed</p><p>Tone: casual, direct</p>"
+    )
+    assert "<br>" not in sent["content"]
+
+
 async def test_create_draft_rich_text_escapes_content(respx_mock, zoho_client):
     # _plaintext_to_safe_html must never let caller-controlled content
     # become live markup -- content is authored as plain text, including

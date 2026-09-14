@@ -9,6 +9,7 @@ import email.header
 import email.parser
 import html
 import json
+import re
 import urllib.parse
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -401,6 +402,9 @@ def _join_addresses(addresses: list[str] | None, *, required: bool = False) -> s
     return ",".join(usable)
 
 
+_SIGNATURE_DOMAIN_RE = re.compile(r"[\w-]+(?:\.[\w-]+)+")
+
+
 def _plaintext_to_safe_html(content: str) -> str:
     """Convert plain text with bare "\\n" line breaks into safe HTML.
 
@@ -412,25 +416,29 @@ def _plaintext_to_safe_html(content: str) -> str:
     function is the one place that gap gets closed, so no caller has to
     remember to do it themselves.
 
-    **Every line is its own paragraph.** This module's real callers
-    (Monarc's outreach drafts, verified live 2026-09-14) never author a
-    blank line anywhere -- every logical point, however short, sits on
-    its own single "\\n"-terminated line, with no "\\n\\n" ever appearing
-    in practice. An earlier version of this function treated only
-    "\\n\\n" as a paragraph break and a lone "\\n" as a same-paragraph
-    ``<br>``, which is the right rule for prose that's been manually
-    soft-wrapped -- but against this system's actual one-line-per-point
-    authoring style it collapsed the entire message into a single ``<p>``
-    with no margin anywhere, reported live as "no line breaks where
-    they're supposed to be" (screenshots showed every sentence flush
-    together with zero paragraph spacing). Every non-blank line now gets
-    its own ``<p>``, which matches how these drafts are actually written
-    and gives each line real vertical spacing -- consecutive blank lines
-    collapse rather than producing empty ``<p></p>`` artifacts.
+    **Every line is its own paragraph, with one named exception: a
+    signature block.** This module's real callers (Monarc's outreach
+    drafts, verified live 2026-09-14) never author a blank line anywhere
+    -- every logical point sits on its own single "\\n"-terminated line.
+    Splitting on blank lines (an earlier version of this function) is the
+    right rule for manually soft-wrapped prose, but against this actual
+    authoring style it collapsed the entire message into one ``<p>`` with
+    no margin anywhere (reported live as "no line breaks where they're
+    supposed to be"). So every non-blank line gets its own ``<p>`` --
+    except the fixed two-line sign-off every Monarc email ends with,
+    "Name | Company" immediately followed by a bare domain
+    ("monarcmediahq.com", no spaces, no protocol): reported live
+    2026-09-14 that those two specific lines must sit directly under each
+    other with no paragraph gap, exactly like a real signature block, not
+    like two more list points. Detected generically (a line containing
+    "|" followed by a line matching a bare hostname shape), not hardcoded
+    to Monarc's own name/domain, so it also holds if either ever changes.
+    That pair is joined into one ``<p>`` with a ``<br>`` between them;
+    every other line still gets its own ``<p>``.
 
     Escapes the input first (``html.escape``), so this never emits a
     caller-controlled tag -- the only markup in the output is the
-    ``<p>`` structure this function itself adds.
+    ``<p>``/``<br>`` structure this function itself adds.
 
     Args:
         content: plain text, exactly as authored for the plaintext path.
@@ -438,9 +446,29 @@ def _plaintext_to_safe_html(content: str) -> str:
     Returns:
         An HTML fragment safe to pass as ``mail_format="html"`` content.
     """
-    escaped = html.escape(content)
-    lines = escaped.split("\n")
-    return "".join(f"<p>{line}</p>" for line in lines if line.strip())
+    lines = [html.escape(line) for line in content.split("\n")]
+    paragraphs: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            i += 1
+            continue
+        next_line = lines[i + 1] if i + 1 < len(lines) else ""
+        next_stripped = next_line.strip()
+        is_signature_pair = (
+            "|" in line
+            and next_stripped
+            and " " not in next_stripped
+            and _SIGNATURE_DOMAIN_RE.fullmatch(next_stripped)
+        )
+        if is_signature_pair:
+            paragraphs.append(f"<p>{line}<br>{next_line}</p>")
+            i += 2
+            continue
+        paragraphs.append(f"<p>{line}</p>")
+        i += 1
+    return "".join(paragraphs)
 
 
 def _add_optional_recipients(
