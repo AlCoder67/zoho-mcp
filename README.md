@@ -2,7 +2,7 @@
 
 An MCP (Model Context Protocol) server that exposes Zoho Mail, Calendar, Contacts, Tasks, Notes, Bookmarks, Groups, and Resource Booking as tools to any MCP-compatible LLM client — Claude, ChatGPT, Gemini, or anything else that speaks MCP.
 
-42 tools covering both reading and writing. Every one has been verified against a live Zoho account rather than built from the documentation alone; where Zoho's API behaves differently than its docs claim, [docs/zoho-api-notes.md](docs/zoho-api-notes.md) records what it actually does.
+43 tools covering both reading and writing. Every one has been verified against a live Zoho account rather than built from the documentation alone; where Zoho's API behaves differently than its docs claim, [docs/zoho-api-notes.md](docs/zoho-api-notes.md) records what it actually does.
 
 **Sending email is disabled by default.** The server saves drafts instead, and only sends if you explicitly opt in. See [Composing email](#composing-email).
 
@@ -283,7 +283,7 @@ Both booleans are matched case-insensitively with surrounding whitespace ignored
 
 ## Running it for a phone
 
-The Claude mobile apps can't spawn a local process, so neither the stdio server nor the MCPB bundle reaches them. What they can talk to is a remote MCP server, added on **claude.ai in a browser** (Settings → Connectors → Add custom connector) — it then syncs to the phone. `zoho-mcp-http` serves the same 42 tools over streamable HTTP for that case.
+The Claude mobile apps can't spawn a local process, so neither the stdio server nor the MCPB bundle reaches them. What they can talk to is a remote MCP server, added on **claude.ai in a browser** (Settings → Connectors → Add custom connector) — it then syncs to the phone. `zoho-mcp-http` serves the same 43 tools over streamable HTTP for that case.
 
 **For a complete hosted deployment, follow [docs/hosting.md](docs/hosting.md)** — a step-by-step Cloud Run walkthrough (container image, public URL, durable state, cost settings, Secret Manager), validated end to end against the real Claude connector. The essentials are summarized below.
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import httpx
 
-from zoho_mcp.releases import ReleaseChecker
+from zoho_mcp.releases import ReleaseChecker, installed_version
 from zoho_mcp.server import create_server
 from zoho_mcp.zoho.auth import ZohoTokenManager
 
@@ -224,6 +224,7 @@ async def test_create_server_registers_every_expected_tool():
         "get_contact",
         "count_contacts",
         "check_for_updates",
+        "server_build_info",
     }
 
 
@@ -314,6 +315,56 @@ async def test_check_for_updates_reaches_the_injected_checker():
     (content,) = await server.call_tool("check_for_updates", {})
 
     assert json.loads(content.text)["installed_version"] == "9.9.9"
+
+
+async def test_server_build_info_is_read_only_local_only():
+    # Unlike check_for_updates, this makes no network call at all -- pure
+    # process introspection -- so a plain _READ_ONLY (no openWorldHint) is
+    # the correct annotation here, not the open-world one.
+    server = build_server()
+
+    tool = next(t for t in await server.list_tools() if t.name == "server_build_info")
+
+    assert tool.annotations.readOnlyHint is True
+    assert tool.annotations.openWorldHint is not True
+
+
+async def test_server_build_info_reports_installed_version_and_source_commit():
+    # The real point of this tool: verifying a specific running process's
+    # actual code, not just its declared version. Added 2026-09-14 after
+    # three live zoho-mcp subprocesses silently kept running pre-fix code
+    # for hours post-push with no error anywhere -- this is the check that
+    # would have caught it in seconds instead of a manual MIME diff.
+    http_client = httpx.AsyncClient()
+    token_manager = ZohoTokenManager(
+        client_id="id",
+        client_secret="secret",
+        refresh_token="refresh",
+        http_client=http_client,
+    )
+    server = create_server(
+        FakeZohoClient(),
+        FakeContactsClient(),
+        token_manager,
+        http_client,
+        ReleaseChecker(http_client, installed="9.9.9", enabled=False),
+    )
+
+    (content,) = await server.call_tool("server_build_info", {})
+    result = json.loads(content.text)
+
+    # installed_version() reads real installed-package metadata directly --
+    # it is intentionally independent of whatever version string a caller
+    # injects into ReleaseChecker (that's a separate, decoupled concern:
+    # check_for_updates's own comparison logic, not this tool's job).
+    assert result["installed_version"] == installed_version()
+    # source_commit is real git output in this checkout (or "unknown" in an
+    # environment with no .git present) -- either is a valid answer, but
+    # the key must always be present so a caller never has to guess.
+    assert "source_commit" in result
+    assert isinstance(result["source_commit"], str) and result["source_commit"]
+    assert "process_started_at" in result
+    assert isinstance(result["process_started_at"], str) and result["process_started_at"]
 
 
 async def test_the_server_reports_its_own_version_in_the_handshake():

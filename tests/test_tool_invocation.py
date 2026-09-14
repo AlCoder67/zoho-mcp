@@ -37,13 +37,15 @@ from zoho_mcp.zoho.auth import ZohoTokenManager
 from zoho_mcp.zoho.client import ZohoClient
 from zoho_mcp.zoho.contacts_client import ZohoContactsClient
 
-# The two registered tools that don't forward to a Zoho client. `authenticate`
-# mutates the token manager and runs a browser flow (covered by
+# The tools that don't forward to a Zoho client. `authenticate` mutates
+# the token manager and runs a browser flow (covered by
 # tests/tools/test_authenticate.py); `check_for_updates` talks to GitHub
 # through a ReleaseChecker (covered by tests/test_releases.py and
 # tests/tools/test_updates_tools.py, with its wiring pinned in
-# tests/test_server.py).
-UNFORWARDED_TOOLS = {"authenticate", "check_for_updates"}
+# tests/test_server.py). `server_build_info` is pure process introspection
+# (installed version, running source commit, process start time) with no
+# client to forward to at all -- covered directly in tests/test_server.py.
+UNFORWARDED_TOOLS = {"authenticate", "check_for_updates", "server_build_info"}
 
 # (tool name, arguments in, expected client method, expected forwarded kwargs).
 #

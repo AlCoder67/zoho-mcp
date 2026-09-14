@@ -9,6 +9,7 @@ environment/keyring config and runs the server over stdio.
 """
 
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -31,7 +32,7 @@ from zoho_mcp.oauth.store import (
     RefreshTokenStore,
 )
 from zoho_mcp.oauth.tokens import TokenSigner, load_or_create_signing_key
-from zoho_mcp.releases import ReleaseChecker, installed_version
+from zoho_mcp.releases import ReleaseChecker, installed_version, running_source_commit
 from zoho_mcp.tools import auth as auth_tools
 from zoho_mcp.tools import bookmarks as bookmarks_tools
 from zoho_mcp.tools import calendar as calendar_tools
@@ -53,6 +54,10 @@ from zoho_mcp.zoho.token_store import (
 )
 
 _READ_ONLY = ToolAnnotations(readOnlyHint=True)
+# Captured at import time (process start), not per-call -- the whole point
+# of server_build_info is answering "when did THIS process start", which a
+# per-call datetime.now() wouldn't distinguish from "when was this called".
+_PROCESS_STARTED_AT = datetime.now(UTC).isoformat()
 _CREATE = ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False
 )
@@ -1087,6 +1092,46 @@ def create_server(
         offering to do it.
         """
         return await updates_tools.check_for_updates(release_checker)
+
+    @mcp.tool(title="Report this server's build/version", annotations=_READ_ONLY)
+    async def server_build_info() -> dict:
+        """Report which code this specific running process actually loaded.
+
+        Touches nothing in Zoho and makes no network call -- pure
+        introspection of this process. Exists for a real failure mode
+        ``check_for_updates`` can't catch: a fix can be committed and
+        pushed while a live, already-running server keeps executing the
+        pre-fix module, silently and without any tool error, because a
+        stdio MCP server is a long-lived subprocess and Python doesn't
+        hot-reload an editable install's source after import. That
+        happened three separate times on 2026-09-14 -- two desktop
+        sessions and one gateway cron worker each kept a stale subprocess
+        for hours after the fix landed -- and it produced no symptom
+        louder than "the output looks wrong" until someone manually
+        diffed a process's start time against a commit timestamp.
+
+        Call this whenever verifying that a just-shipped code fix has
+        actually taken effect in a specific running server -- e.g. right
+        after restarting a process that's supposed to have picked up new
+        code -- rather than assuming a restart succeeded. Compare
+        ``source_commit`` against the commit you just pushed: if this
+        process is still reporting an older or unrelated commit, either
+        the restart didn't happen, a different process answered this
+        call than the one that was restarted, or the deployed checkout
+        itself hasn't moved yet.
+
+        Returns {"installed_version": str, "source_commit": str,
+        "process_started_at": str (ISO 8601, UTC)}. ``source_commit`` is
+        "unknown" for a non-editable install with no ``.git`` present
+        (nothing wrong with that -- it just means this check doesn't
+        apply there; fall back to ``installed_version`` plus a real
+        version bump for that case).
+        """
+        return {
+            "installed_version": installed_version(),
+            "source_commit": running_source_commit(),
+            "process_started_at": _PROCESS_STARTED_AT,
+        }
 
     return mcp
 

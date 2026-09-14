@@ -9,10 +9,12 @@ README's "Updating" section for why an MCPB bundle cannot safely upgrade
 itself.
 """
 
+import subprocess
 import time
 from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
+from pathlib import Path
 
 import httpx
 
@@ -77,6 +79,64 @@ def installed_version() -> str:
         return distribution_version(DISTRIBUTION_NAME)
     except PackageNotFoundError:
         return UNKNOWN_VERSION
+
+
+def running_source_commit(repo_dir: Path | None = None) -> str:
+    """Return the git commit this process's source directory is checked out
+    at, or ``"unknown"`` if that can't be determined.
+
+    Exists for a real gap ``installed_version()`` doesn't cover: an editable
+    (``uv run --directory``) install's *code* moves the moment a commit is
+    checked out, but the *running process* keeps whatever it loaded at
+    import time -- a stdio MCP server is a long-lived subprocess, and Python
+    doesn't hot-reload. On 2026-09-14 exactly this happened three times in
+    one afternoon: real fixes were committed and pushed while three live
+    zoho-mcp subprocesses (two desktop sessions, one gateway cron worker)
+    kept serving the pre-fix module, silently and without any error --
+    every tool call still succeeded, it just used stale code. It was only
+    caught by manually inspecting each process's PID start-time against
+    each commit's timestamp and diffing raw MIME output against what the
+    new code should have produced.
+
+    ``installed_version()`` can't catch this: a version bump is a human
+    decision that didn't happen for any of these three commits (all fixes
+    within the same 0.3.2), so the reported version was identical and
+    correct before, during, and after the process was stale. A commit hash
+    is what actually changed between "the code that's committed" and "the
+    code this process loaded", so it's the only value that can answer
+    "is this specific running process current" without depending on anyone
+    remembering to bump a version for a fix that doesn't warrant a release.
+
+    Args:
+        repo_dir: directory to run `git rev-parse` in. Defaults to the
+            directory containing this file's package, which is correct for
+            both a source checkout and an editable install (this file's own
+            `__file__` lives inside the checked-out tree either way).
+
+    Returns:
+        The full commit hash `git rev-parse HEAD` reports for that
+        directory, or ``"unknown"`` if git isn't available, the directory
+        isn't a git checkout (e.g. a packaged non-editable install with no
+        `.git` present), or the command fails for any other reason. Never
+        raises -- this is a diagnostic value, not something that should be
+        able to break server startup or a tool call.
+    """
+    directory = repo_dir if repo_dir is not None else Path(__file__).resolve().parent
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return UNKNOWN_VERSION
+    if result.returncode != 0:
+        return UNKNOWN_VERSION
+    commit = result.stdout.strip()
+    return commit if commit else UNKNOWN_VERSION
 
 
 def parse_version(text: object) -> tuple[int, int, int]:

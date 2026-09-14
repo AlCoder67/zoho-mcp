@@ -18,10 +18,12 @@ from zoho_mcp.releases import (
     CACHE_TTL_SECONDS,
     GITHUB_LATEST_RELEASE_URL,
     RELEASES_PAGE_URL,
+    UNKNOWN_VERSION,
     ReleaseChecker,
     ReleaseCheckError,
     installed_version,
     parse_version,
+    running_source_commit,
 )
 
 INSTALLED = "0.1.0"
@@ -442,3 +444,79 @@ async def test_a_failed_check_is_not_cached(latest_release_route, checker):
     result = await checker.check()
 
     assert result["update_available"] is True
+
+
+class TestRunningSourceCommit:
+    """`running_source_commit` -- the check that catches a stale process.
+
+    Added 2026-09-14 after a real live incident: three separate zoho-mcp
+    subprocesses kept running pre-fix code for hours after the fix was
+    committed and pushed, with no error anywhere, discovered only by
+    manually diffing a process's start time against a commit timestamp.
+    `installed_version()` couldn't have caught it (no version bump
+    happened for any of the three fixes), which is why this is a
+    genuinely separate check rather than a restatement of that one.
+    """
+
+    def test_reports_the_real_head_commit_of_this_checkout(self):
+        # This test file lives inside the actual zoho-mcp git checkout, so
+        # this is a real, non-mocked assertion against real git output --
+        # deliberately not mocking subprocess.run here, since the entire
+        # point of this function is "does it correctly read the real repo
+        # state", which a mock can't exercise.
+        import subprocess
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parent.parent
+        expected = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout.strip()
+
+        assert running_source_commit(repo_root) == expected
+        assert expected != ""
+
+    def test_returns_unknown_for_a_directory_with_no_git_checkout(self, tmp_path):
+        # A packaged (non-editable) install has no .git present at all --
+        # this must degrade to "unknown", not raise, since it's a
+        # perfectly normal, valid state for that install shape.
+        assert running_source_commit(tmp_path) == UNKNOWN_VERSION
+
+    def test_returns_unknown_rather_than_raising_when_git_is_missing(self, monkeypatch):
+        # If git itself isn't on PATH in some environment, this is a
+        # diagnostic value, not something that should be able to crash
+        # server startup or a tool call over a missing binary.
+        import subprocess
+
+        def _raise_file_not_found(*args, **kwargs):
+            raise FileNotFoundError("git not found")
+
+        monkeypatch.setattr(subprocess, "run", _raise_file_not_found)
+
+        assert running_source_commit() == UNKNOWN_VERSION
+
+    def test_returns_unknown_when_git_command_fails(self, tmp_path, monkeypatch):
+        # A nonzero return code (e.g. a corrupted .git, or a detached
+        # worktree in a state git itself refuses) must not raise either.
+        import subprocess
+
+        class _FakeCompletedProcess:
+            returncode = 128
+            stdout = ""
+
+        monkeypatch.setattr(
+            subprocess, "run", lambda *a, **kw: _FakeCompletedProcess()
+        )
+
+        assert running_source_commit(tmp_path) == UNKNOWN_VERSION
+
+    def test_defaults_to_this_packages_own_directory(self):
+        # No repo_dir given -- must resolve to somewhere inside this real
+        # checkout (not raise, not silently return "unknown" just because
+        # no argument was passed), since that's the actual call shape
+        # server_build_info uses.
+        assert running_source_commit() != UNKNOWN_VERSION
