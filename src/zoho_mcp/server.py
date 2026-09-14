@@ -381,39 +381,64 @@ def create_server(
         content: str,
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
+        rich_text: bool = False,
     ) -> dict:
         """Save an email as a draft in Zoho Mail. Does NOT send it.
 
         to: recipient addresses (at least one).
-        subject / content: the subject line and message body.
+        subject / content: the subject line and message body, authored
+        as plain text with bare "\\n" line breaks either way.
         cc / bcc (optional): additional recipients.
+        rich_text (optional, default False): render the same content
+        with real paragraph/line-break formatting instead of Zoho's
+        plaintext view. Content is still written the same way -- this
+        only changes how it displays. Leave off unless richer-looking
+        formatting was specifically requested.
 
         This is the right tool for essentially every "write an email" or
         "reply to this" request: it leaves the message in Drafts for the
         user to read and send themselves. Returns {"id": ...}.
         """
         return await mail_tools.create_draft(
-            client, to=to, subject=subject, content=content, cc=cc, bcc=bcc
+            client,
+            to=to,
+            subject=subject,
+            content=content,
+            cc=cc,
+            bcc=bcc,
+            rich_text=rich_text,
         )
 
     @mcp.tool(title="Save a reply draft", annotations=_CREATE)
     async def reply_draft(
-        message_id: str, content: str, reply_all: bool = False
+        message_id: str,
+        content: str,
+        reply_all: bool = False,
+        rich_text: bool = False,
     ) -> dict:
         """Save a reply to an existing email as a draft. Does NOT send it.
 
         message_id: the email being replied to, from search_emails or
         list_emails.
-        content: the reply body.
+        content: the new reply text, authored as plain text with bare
+        "\\n" line breaks either way. Never the quoted original message.
         reply_all (optional): reply to every recipient instead of just
         the sender.
+        rich_text (optional, default False): render this new reply text
+        with real paragraph/line-break formatting instead of plaintext.
+        Only affects this new text, never the quoted original. Leave off
+        unless richer-looking formatting was specifically requested.
 
         Returns {"id": ...}. There is no send-a-reply tool by design --
         replies quote incoming mail, so they always land in Drafts for a
         human to review before anything leaves the account.
         """
         return await mail_tools.reply_draft(
-            client, message_id=message_id, content=content, reply_all=reply_all
+            client,
+            message_id=message_id,
+            content=content,
+            reply_all=reply_all,
+            rich_text=rich_text,
         )
 
     @mcp.tool(title="Save a forward draft", annotations=_CREATE)

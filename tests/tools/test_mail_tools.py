@@ -87,15 +87,27 @@ class FakeZohoClient:
         self.list_signatures_calls += 1
         return self.list_signatures_result
 
-    async def create_draft(self, to, subject, content, cc=None, bcc=None):
+    async def create_draft(self, to, subject, content, cc=None, bcc=None, rich_text=False):
         self.create_draft_calls.append(
-            {"to": to, "subject": subject, "content": content, "cc": cc, "bcc": bcc}
+            {
+                "to": to,
+                "subject": subject,
+                "content": content,
+                "cc": cc,
+                "bcc": bcc,
+                "rich_text": rich_text,
+            }
         )
         return self.compose_result
 
-    async def reply_draft(self, message_id, content, reply_all=False):
+    async def reply_draft(self, message_id, content, reply_all=False, rich_text=False):
         self.reply_draft_calls.append(
-            {"message_id": message_id, "content": content, "reply_all": reply_all}
+            {
+                "message_id": message_id,
+                "content": content,
+                "reply_all": reply_all,
+                "rich_text": rich_text,
+            }
         )
         return self.compose_result
 
@@ -394,9 +406,20 @@ async def test_create_draft_delegates_to_client():
             "content": "B",
             "cc": ["c@x.com"],
             "bcc": None,
+            "rich_text": False,
         }
     ]
     assert result == client.compose_result
+
+
+async def test_create_draft_passes_rich_text_through():
+    client = FakeZohoClient()
+
+    await create_draft(
+        client, to=["a@x.com"], subject="S", content="B", rich_text=True
+    )
+
+    assert client.create_draft_calls[0]["rich_text"] is True
 
 
 async def test_reply_draft_delegates_to_client():
@@ -405,8 +428,16 @@ async def test_reply_draft_delegates_to_client():
     await reply_draft(client, message_id="m-1", content="B", reply_all=True)
 
     assert client.reply_draft_calls == [
-        {"message_id": "m-1", "content": "B", "reply_all": True}
+        {"message_id": "m-1", "content": "B", "reply_all": True, "rich_text": False}
     ]
+
+
+async def test_reply_draft_passes_rich_text_through():
+    client = FakeZohoClient()
+
+    await reply_draft(client, message_id="m-1", content="B", rich_text=True)
+
+    assert client.reply_draft_calls[0]["rich_text"] is True
 
 
 async def test_forward_draft_delegates_to_client():

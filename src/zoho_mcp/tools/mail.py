@@ -226,6 +226,7 @@ async def create_draft(
     content: str,
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
+    rich_text: bool = False,
 ) -> dict:
     """Save an email as a draft. Never sends.
 
@@ -233,8 +234,16 @@ async def create_draft(
         client: injected Zoho client.
         to: recipient addresses (at least one required).
         subject: the subject line.
-        content: the message body.
+        content: the message body, authored as plain text with bare
+            "\\n" line breaks -- true whether or not ``rich_text`` is set.
         cc/bcc: optional additional recipients.
+        rich_text: opt-in, defaults to False. False keeps the existing
+            plaintext rendering. True renders the same plain-text
+            content as real paragraphs/line breaks in the recipient's
+            client instead of Zoho's monospace-looking plaintext view --
+            still authored the same way, just displayed with normal text
+            formatting. Leave this off unless the user has specifically
+            asked for richer-looking formatting.
 
     Returns:
         ``{"id": ...}`` -- the new draft's message id.
@@ -244,20 +253,28 @@ async def create_draft(
             rejects or fails the request.
     """
     return await client.create_draft(
-        to=to, subject=subject, content=content, cc=cc, bcc=bcc
+        to=to, subject=subject, content=content, cc=cc, bcc=bcc, rich_text=rich_text
     )
 
 
 async def reply_draft(
-    client: ZohoClient, message_id: str, content: str, reply_all: bool = False
+    client: ZohoClient,
+    message_id: str,
+    content: str,
+    reply_all: bool = False,
+    rich_text: bool = False,
 ) -> dict:
     """Save a reply to an existing email as a draft. Never sends.
 
     Args:
         client: injected Zoho client.
         message_id: the email being replied to.
-        content: the reply body.
+        content: the new reply text, plain text with bare "\\n" line
+            breaks -- true whether or not ``rich_text`` is set.
         reply_all: reply to all recipients rather than just the sender.
+        rich_text: opt-in, defaults to False. See ``create_draft``'s
+            ``rich_text`` for what it does; applies only to this new
+            reply text, never the quoted original message.
 
     Returns:
         ``{"id": ...}`` -- the new draft's message id.
@@ -267,7 +284,10 @@ async def reply_draft(
             or fails the request.
     """
     return await client.reply_draft(
-        message_id=message_id, content=content, reply_all=reply_all
+        message_id=message_id,
+        content=content,
+        reply_all=reply_all,
+        rich_text=rich_text,
     )
 
 

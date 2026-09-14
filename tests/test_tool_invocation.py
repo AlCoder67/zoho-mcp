@@ -106,13 +106,14 @@ MAIL_CASES = [
             "content": "B",
             "cc": ["c@example.com"],
             "bcc": ["d@example.com"],
+            "rich_text": False,
         },
     ),
     (
         "reply_draft",
         {"message_id": "m-1", "content": "B", "reply_all": True},
         "reply_draft",
-        {"message_id": "m-1", "content": "B", "reply_all": True},
+        {"message_id": "m-1", "content": "B", "reply_all": True, "rich_text": False},
     ),
     (
         "forward_draft",

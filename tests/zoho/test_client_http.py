@@ -3106,6 +3106,68 @@ async def test_create_draft_works_without_auto_send_enabled(respx_mock, zoho_cli
     assert route.called
 
 
+async def test_create_draft_default_stays_plaintext(respx_mock, zoho_client):
+    # rich_text defaults to False; the tested plaintext path from the
+    # 2026-09-10 fix must be completely unaffected by rich_text existing.
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(to=["a@example.com"], subject="Hi", content="B")
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["mailFormat"] == "plaintext"
+    assert sent["content"] == "B"
+
+
+async def test_create_draft_rich_text_sets_mail_format_html(respx_mock, zoho_client):
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(
+        to=["a@example.com"], subject="Hi", content="Line one\nLine two", rich_text=True
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["mailFormat"] == "html"
+
+
+async def test_create_draft_rich_text_converts_bare_newlines(respx_mock, zoho_client):
+    # This is the regression the 2026-09-10 fix exists to prevent, in the
+    # new rich_text path: a bare "\n" sent as html content with no <br>
+    # collapses in the recipient's client. Assert the actual HTML markup
+    # is present, not just that mailFormat says "html".
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(
+        to=["a@example.com"],
+        subject="Hi",
+        content="Paragraph one line one\nParagraph one line two\n\nParagraph two",
+        rich_text=True,
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert "<br>" in sent["content"]
+    assert sent["content"].count("<p>") == 2
+
+
+async def test_create_draft_rich_text_escapes_content(respx_mock, zoho_client):
+    # _plaintext_to_safe_html must never let caller-controlled content
+    # become live markup -- content is authored as plain text, including
+    # by callers quoting untrusted inbound email (reply_draft's exact
+    # threat model), so any "<"/"&" in it must come through escaped.
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(
+        to=["a@example.com"],
+        subject="Hi",
+        content="<script>alert(1)</script> & more",
+        rich_text=True,
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert "<script>" not in sent["content"]
+    assert "&lt;script&gt;" in sent["content"]
+    assert "&amp; more" in sent["content"]
+
+
 async def test_send_email_sets_draft_mode_when_not_enabled(respx_mock, zoho_client):
     # The critical safety test. A disabled client still posts -- it saves the
     # message to Drafts rather than erroring -- so "made no request" is no
@@ -3379,6 +3441,38 @@ async def test_reply_draft_always_sets_mail_format_plaintext(respx_mock, zoho_cl
 
     sent = json.loads(route.calls.last.request.content)
     assert sent["mailFormat"] == "plaintext"
+
+
+async def test_reply_draft_rich_text_sets_mail_format_html(respx_mock, zoho_client):
+    respx_mock.get("https://mail.zoho.com/api/accounts").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "accountId": ACCOUNT_ID,
+                        "isDefaultAccount": True,
+                        "timeZone": "America/Los_Angeles",
+                        "primaryEmailAddress": "personal@example.com",
+                        "mailboxAddress": "me@example.com",
+                    }
+                ]
+            },
+        )
+    )
+    route = respx_mock.post(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/m-1"
+    ).mock(
+        return_value=httpx.Response(200, json={"data": {"messageId": "msg-reply-3"}})
+    )
+
+    await zoho_client.reply_draft(
+        message_id="m-1", content="Line one\n\nLine two", rich_text=True
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["mailFormat"] == "html"
+    assert sent["content"].count("<p>") == 2
 
 
 async def test_reply_draft_uses_reply_all_action_when_asked(respx_mock, zoho_client):

@@ -9,6 +9,7 @@ import email.header
 import email.parser
 import html
 import json
+import re
 import urllib.parse
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -399,6 +400,38 @@ def _join_addresses(addresses: list[str] | None, *, required: bool = False) -> s
     if required and not usable:
         raise ZohoAPIError("at least one recipient address is required")
     return ",".join(usable)
+
+
+def _plaintext_to_safe_html(content: str) -> str:
+    """Convert plain text with bare "\\n" line breaks into safe HTML.
+
+    Exists so a ``rich_text=True`` caller can keep authoring content
+    exactly like every plaintext caller does -- plain text, bare "\\n" --
+    without reintroducing the 2026-09-10 collapsed-paragraph bug (see
+    ``create_draft``/``reply_draft``'s docstrings). That bug happened
+    because a bare "\\n" carries no meaning to an HTML renderer; this
+    function is the one place that gap gets closed, so no caller has to
+    remember to do it themselves.
+
+    Escapes the input first (``html.escape``), so this never emits a
+    caller-controlled tag -- the only markup in the output is the
+    paragraph/``<br>`` structure this function itself adds. Blank lines
+    (two or more consecutive "\\n") become paragraph breaks; a single
+    "\\n" inside a paragraph becomes ``<br>``.
+
+    Args:
+        content: plain text, exactly as authored for the plaintext path.
+
+    Returns:
+        An HTML fragment safe to pass as ``mail_format="html"`` content.
+    """
+    escaped = html.escape(content)
+    paragraphs = re.split(r"\n{2,}", escaped)
+    return "".join(
+        f"<p>{paragraph.replace(chr(10), '<br>')}</p>"
+        for paragraph in paragraphs
+        if paragraph.strip()
+    )
 
 
 def _add_optional_recipients(
@@ -1895,14 +1928,28 @@ class ZohoClient:
         content: str,
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
+        rich_text: bool = False,
     ) -> dict:
         """Save an email as a draft. Never sends, and is never gated.
 
         Args:
             to: recipient addresses (at least one required).
             subject: the subject line.
-            content: the message body.
+            content: the message body, authored as plain text with bare
+                "\\n" line breaks (this is true regardless of
+                ``rich_text`` -- see below).
             cc/bcc: optional additional recipients.
+            rich_text: opt-in, defaults to False. False (the default)
+                keeps the existing, tested plaintext path unchanged --
+                see the plaintext note below. True requests HTML
+                rendering: ``content`` is still authored as plain text
+                with bare "\\n", and this method converts it to safe
+                HTML itself (escaping, then "\\n\\n" -> paragraph break,
+                single "\\n" -> ``<br>``) before it ever reaches Zoho --
+                callers never author raw HTML. This exists as a scoped,
+                explicit per-call override precisely so the *default*
+                for every other caller stays the tested plaintext path;
+                it does not change what an omitted/default call does.
 
         Returns:
             ``{"id": ...}`` -- the new draft's message id.
@@ -1922,7 +1969,24 @@ class ZohoClient:
         # dashboard/incidents.json in Monarc-Operations for the report
         # that traced it here. mailFormat="plaintext" makes Zoho emit a
         # single text/plain part instead, where "\n" is a real line break
-        # to every consumer. Never omit this.
+        # to every consumer. Never omit this on the default path.
+        #
+        # rich_text=True (added 2026-09-14, scoped opt-in, never the
+        # default) hits the exact same failure mode a different way if
+        # the newlines aren't converted first -- HTML still collapses a
+        # bare "\n". _plaintext_to_safe_html does that conversion here,
+        # before the request is built, so this path can never regress
+        # into the 2026-09-10 bug in a new form.
+        if rich_text:
+            return await self._compose(
+                to=to,
+                subject=subject,
+                content=_plaintext_to_safe_html(content),
+                cc=cc,
+                bcc=bcc,
+                as_draft=True,
+                mail_format="html",
+            )
         return await self._compose(
             to=to,
             subject=subject,
@@ -2021,7 +2085,11 @@ class ZohoClient:
         return {**sent, "sent": True}
 
     async def reply_draft(
-        self, message_id: str, content: str, reply_all: bool = False
+        self,
+        message_id: str,
+        content: str,
+        reply_all: bool = False,
+        rich_text: bool = False,
     ) -> dict:
         """Save a reply to an existing email as a draft. Never sends.
 
@@ -2033,8 +2101,15 @@ class ZohoClient:
         Args:
             message_id: the email being replied to, from ``search_emails``
                 or ``list_emails``.
-            content: the reply body.
+            content: the new reply text, authored as plain text with
+                bare "\\n" line breaks -- true whether or not ``rich_text``
+                is set. Never the quoted original, which Zoho appends
+                separately and which this never touches.
             reply_all: reply to every recipient rather than just the sender.
+            rich_text: opt-in, defaults to False. Same behavior as
+                ``create_draft``'s ``rich_text`` -- see that docstring.
+                Applies only to this new reply text; the quoted original
+                message is untouched either way.
 
         Returns:
             ``{"id": ...}`` -- the new draft's message id.
@@ -2047,7 +2122,7 @@ class ZohoClient:
             raise ZohoAPIError("content must not be blank")
         body = {
             "fromAddress": await self._get_from_address(),
-            "content": content,
+            "content": _plaintext_to_safe_html(content) if rich_text else content,
             "action": "replyall" if reply_all else "reply",
             "mode": "draft",  # never remove: without it Zoho sends the reply
             # mailFormat="plaintext": same defect and fix as create_draft
@@ -2055,7 +2130,12 @@ class ZohoClient:
             # that an omitted mailFormat here produces the identical
             # collapsed-paragraph bug in the new reply text (the quoted
             # original still renders correctly either way).
-            "mailFormat": "plaintext",
+            #
+            # rich_text=True (2026-09-14, scoped opt-in, same as
+            # create_draft) needs mailFormat="html" instead, with content
+            # pre-converted by _plaintext_to_safe_html above -- same
+            # reasoning as create_draft's rich_text path.
+            "mailFormat": "html" if rich_text else "plaintext",
         }
         account_id = await self._get_account_id()
         payload = await self._post(
