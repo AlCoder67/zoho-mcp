@@ -2068,7 +2068,20 @@ class ZohoClient:
                 and this repo's own scheduler spec (agents/6-scheduler.md)
                 says drafts intentionally carry no signature. Always sent
                 to Zoho with ``mailFormat="html"``, the only combination
-                confirmed to actually append the card.
+                confirmed to actually append the card. **Real bug, found
+                live 2026-09-15: switching to ``mailFormat="html"`` for
+                this flag without converting ``content`` first sent the
+                raw plain-text body straight through -- Zoho's HTML
+                renderer treats a bare "\n" as nothing, so every
+                paragraph break collapsed into one run-on block and the
+                signature landed squashed into the last sentence. Two real
+                sent emails were corrupted this way before it was caught.
+                Fixed by routing ``content`` through
+                ``_plaintext_to_safe_html`` (the same conversion
+                ``create_draft``'s ``rich_text=True`` path already used)
+                whenever this flag switches the format to html -- the
+                plain-text path (``include_signature=False``) is
+                unaffected and still sent verbatim.**
 
         Args (remaining): same as ``create_draft``.
 
@@ -2112,7 +2125,7 @@ class ZohoClient:
         sent = await self._compose(
             to=to,
             subject=subject,
-            content=content,
+            content=_plaintext_to_safe_html(content) if include_signature else content,
             cc=cc,
             bcc=bcc,
             as_draft=False,

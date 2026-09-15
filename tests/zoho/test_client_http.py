@@ -3353,6 +3353,35 @@ async def test_send_email_can_include_signature_on_a_real_send(
     assert sent["mailFormat"] == "html"
 
 
+async def test_send_email_with_signature_converts_plaintext_body_to_html(
+    respx_mock, sending_client
+):
+    # Real bug, found live 2026-09-15: switching mailFormat to "html" for
+    # include_signature=True (required -- see the test above) sent the raw
+    # plain-text content straight through, with bare "\n" line breaks that
+    # mean nothing to an HTML renderer. Zoho collapsed every paragraph break
+    # into one run-on block, and the signature card landed squashed into the
+    # last sentence -- the exact defect create_draft/reply_draft's rich_text
+    # path (and _plaintext_to_safe_html) already exist to prevent, just never
+    # wired into this path. A real multi-line body must arrive as real HTML
+    # paragraphs, not as the untouched plain-text string.
+    route = mock_compose_endpoints(respx_mock)
+
+    await sending_client.send_email(
+        to=["a@example.com"],
+        subject="Hi",
+        content="Line one.\nLine two.\nLine three.",
+        include_signature=True,
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["content"] != "Line one.\nLine two.\nLine three."
+    assert "<p>" in sent["content"] or "<br" in sent["content"]
+    assert "Line one." in sent["content"]
+    assert "Line two." in sent["content"]
+    assert "Line three." in sent["content"]
+
+
 async def test_send_email_omits_include_signature_by_default(
     respx_mock, sending_client
 ):
