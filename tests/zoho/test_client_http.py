@@ -75,6 +75,18 @@ def mock_compose_endpoints(respx_mock):
     )
 
 
+def mock_no_duplicate_sent(respx_mock):
+    """An empty Sent-search result, for tests where send_email's new
+    duplicate-send guard (``_find_duplicate_sent``) must not find a match.
+    Real sends (``sending_client``) run this search before composing, so
+    any test exercising that path needs the route mocked even when a
+    duplicate is not what the test is about.
+    """
+    return respx_mock.get(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/search"
+    ).mock(return_value=httpx.Response(200, json={"data": []}))
+
+
 def mock_pacific_accounts_endpoint(respx_mock):
     return respx_mock.get("https://mail.zoho.com/api/accounts").mock(
         return_value=httpx.Response(
@@ -3283,6 +3295,7 @@ async def test_send_email_still_rejects_missing_recipients_when_not_enabled(
 
 async def test_send_email_omits_mode_so_zoho_actually_sends(respx_mock, sending_client):
     route = mock_compose_endpoints(respx_mock)
+    mock_no_duplicate_sent(respx_mock)
 
     result = await sending_client.send_email(
         to=["a@example.com"], subject="Hi", content="Body"
@@ -3343,6 +3356,7 @@ async def test_send_email_can_include_signature_on_a_real_send(
     # the account's configured signature card when paired with
     # mailFormat="html" on a real send. See client.py's _compose docstring.
     route = mock_compose_endpoints(respx_mock)
+    mock_no_duplicate_sent(respx_mock)
 
     await sending_client.send_email(
         to=["a@example.com"], subject="Hi", content="Body", include_signature=True
@@ -3366,6 +3380,7 @@ async def test_send_email_with_signature_converts_plaintext_body_to_html(
     # wired into this path. A real multi-line body must arrive as real HTML
     # paragraphs, not as the untouched plain-text string.
     route = mock_compose_endpoints(respx_mock)
+    mock_no_duplicate_sent(respx_mock)
 
     await sending_client.send_email(
         to=["a@example.com"],
@@ -3386,6 +3401,7 @@ async def test_send_email_omits_include_signature_by_default(
     respx_mock, sending_client
 ):
     route = mock_compose_endpoints(respx_mock)
+    mock_no_duplicate_sent(respx_mock)
 
     await sending_client.send_email(to=["a@example.com"], subject="Hi", content="Body")
 
@@ -4394,3 +4410,242 @@ async def test_listing_tools_keep_padding_when_the_flag_is_off(
     results = _listing_emails(await getattr(zoho_client, tool)(**_LISTING_CALLS[tool]))
 
     assert results[0]["snippet"] == padded
+
+
+# --- send_email(source_draft_id=...) -- verbatim send from a real draft ---
+#
+# Added after a real, repeat incident: an LLM caller twice reconstructed a
+# drafted email from memory/CRM fields instead of sending the actual draft
+# verbatim (2026-08-10, Nopalera; recurred 2026-09-21, Bask and Lather Co,
+# six weeks after the first occurrence was documented and a prompt-level
+# fix was written). These tests pin the structural fix: the server fetches
+# the draft's own content, so there is no step where a caller could type
+# something else.
+
+
+async def test_send_email_rejects_both_content_and_source_draft_id(
+    respx_mock, sending_client
+):
+    route = respx_mock.post(f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages")
+
+    with pytest.raises(ZohoAPIError, match="exactly one"):
+        await sending_client.send_email(
+            to=["a@example.com"],
+            subject="Hi",
+            content="B",
+            source_draft_id="d-1",
+            source_folder_id="f-1",
+        )
+
+    assert not route.called
+
+
+async def test_send_email_rejects_neither_content_nor_source_draft_id(
+    respx_mock, sending_client
+):
+    route = respx_mock.post(f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages")
+
+    with pytest.raises(ZohoAPIError, match="exactly one"):
+        await sending_client.send_email(to=["a@example.com"], subject="Hi")
+
+    assert not route.called
+
+
+async def test_send_email_rejects_source_draft_id_without_source_folder_id(
+    respx_mock, sending_client
+):
+    route = respx_mock.post(f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages")
+
+    with pytest.raises(ZohoAPIError, match="source_folder_id"):
+        await sending_client.send_email(
+            to=["a@example.com"], subject="Hi", source_draft_id="d-1"
+        )
+
+    assert not route.called
+
+
+async def test_send_email_with_source_draft_id_sends_the_drafts_real_content(
+    respx_mock, sending_client
+):
+    # The core guarantee: the body that goes out is fetched from Zoho's own
+    # content endpoint for the named draft, not anything the caller typed
+    # (the caller here never passes a content string at all).
+    mock_no_duplicate_sent(respx_mock)
+    respx_mock.get(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}"
+        f"/folders/drafts-folder/messages/d-1/content"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "messageId": "d-1",
+                    "content": "<p>Hi Rachel, following up on this.</p>",
+                }
+            },
+        )
+    )
+    route = mock_compose_endpoints(respx_mock)
+
+    result = await sending_client.send_email(
+        to=["rachel@example.com"],
+        subject="Following up",
+        source_draft_id="d-1",
+        source_folder_id="drafts-folder",
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert "Hi Rachel, following up on this." in sent["content"]
+    assert result["sent"] is True
+
+
+# --- send_email duplicate-send guard ---
+#
+# Guards the exact shape of the 2026-09-21 incident: Scheduler sent 12 real
+# emails duplicating touches already sent weeks earlier, because the
+# per-run check that should have caught it was skipped under context
+# pressure. This check now runs inside the send path itself.
+
+
+def _raw_sent_email(message_id, subject, to_address, date="1730217600000"):
+    return {
+        "messageId": message_id,
+        "fromAddress": "me@example.com",
+        "toAddress": to_address,
+        "subject": subject,
+        "receivedTime": date,
+        "summary": "Snippet",
+        "status": "1",
+        "folderId": "sent-folder-id",
+    }
+
+
+async def test_send_email_refuses_a_duplicate_by_recipient_and_subject(
+    respx_mock, sending_client
+):
+    mock_compose_endpoints(respx_mock)
+    post_route = respx_mock.post(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages"
+    )
+    respx_mock.get(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/search"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    _raw_sent_email(
+                        "old-1", "spoiled pets, the chewy launch window",
+                        "a@example.com",
+                    )
+                ]
+            },
+        )
+    )
+
+    with pytest.raises(ZohoAPIError, match="already went"):
+        await sending_client.send_email(
+            to=["a@example.com"],
+            subject="spoiled pets, the chewy launch window",
+            content="Body",
+        )
+
+    assert not post_route.called
+
+
+async def test_send_email_duplicate_guard_ignores_a_re_prefix(
+    respx_mock, sending_client
+):
+    # The 2026-09-21 incident's actual sends carried the original subject
+    # with no "Re:" added, but a reply-shaped resend (Re: <original>) is
+    # the same underlying touch and must be caught the same way.
+    mock_compose_endpoints(respx_mock)
+    post_route = respx_mock.post(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages"
+    )
+    respx_mock.get(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/search"
+    ).mock(
+        return_value=httpx.Response(
+            200, json={"data": [_raw_sent_email("old-1", "Hi there", "a@example.com")]}
+        )
+    )
+
+    with pytest.raises(ZohoAPIError, match="already went"):
+        await sending_client.send_email(
+            to=["a@example.com"], subject="Re:  hi there", content="Body"
+        )
+
+    assert not post_route.called
+
+
+async def test_send_email_duplicate_guard_requires_matching_recipient(
+    respx_mock, sending_client
+):
+    # A same-subject Sent message to a DIFFERENT recipient is not a
+    # duplicate -- e.g. two different brands with a coincidentally
+    # identical subject line.
+    mock_no_duplicate_sent(respx_mock)
+    route = mock_compose_endpoints(respx_mock)
+    respx_mock.get(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/search"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    _raw_sent_email("old-1", "Hi there", "someone-else@example.com")
+                ]
+            },
+        )
+    )
+
+    result = await sending_client.send_email(
+        to=["a@example.com"], subject="Hi there", content="Body"
+    )
+
+    assert result["sent"] is True
+    assert route.called
+
+
+async def test_send_email_force_duplicate_bypasses_the_guard(
+    respx_mock, sending_client
+):
+    route = mock_compose_endpoints(respx_mock)
+    respx_mock.get(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/search"
+    ).mock(
+        return_value=httpx.Response(
+            200, json={"data": [_raw_sent_email("old-1", "Hi there", "a@example.com")]}
+        )
+    )
+
+    result = await sending_client.send_email(
+        to=["a@example.com"],
+        subject="Hi there",
+        content="Body",
+        force_duplicate=True,
+    )
+
+    assert result["sent"] is True
+    assert route.called
+
+
+async def test_send_email_duplicate_guard_does_not_apply_to_the_gated_draft_fallback(
+    respx_mock, zoho_client
+):
+    # zoho_client has auto-send off -- send_email always drafts, never
+    # sends, so there is nothing for a duplicate-send guard to protect
+    # against; it must not add an extra search call to that path.
+    route = mock_compose_endpoints(respx_mock)
+    search_route = respx_mock.get(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/search"
+    )
+
+    result = await zoho_client.send_email(
+        to=["a@example.com"], subject="Hi there", content="Body"
+    )
+
+    assert result["sent"] is False
+    assert route.called
+    assert not search_route.called

@@ -148,6 +148,9 @@ MAIL_CASES = [
             "cc": None,
             "bcc": None,
             "include_signature": False,
+            "source_draft_id": None,
+            "source_folder_id": None,
+            "force_duplicate": False,
         },
     ),
     (

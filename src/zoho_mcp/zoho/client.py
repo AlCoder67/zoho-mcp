@@ -2034,14 +2034,98 @@ class ZohoClient:
             mail_format="plaintext",
         )
 
+    _RE_PREFIX_RE = re.compile(r"^(?:re|fwd?)\s*:\s*", re.IGNORECASE)
+
+    @classmethod
+    def _normalized_subject(cls, subject: str) -> str:
+        """Strip a leading Re:/Fwd: chain and collapse whitespace for comparison.
+
+        Applied to both sides of the duplicate-send check below so
+        "Re: Hi" and "Hi" (or "re:  Hi", any case/spacing) compare equal
+        -- the same underlying touch resent with an added reply prefix is
+        exactly the shape the 2026-09-21 incident produced.
+        """
+        stripped = subject
+        while True:
+            new = cls._RE_PREFIX_RE.sub("", stripped, count=1)
+            if new == stripped:
+                break
+            stripped = new
+        return " ".join(stripped.split()).casefold()
+
+    async def _find_duplicate_sent(
+        self, to: list[str], subject: str
+    ) -> dict[str, str] | None:
+        """Look for a prior Sent message to any of ``to`` with the same subject.
+
+        Guards the exact shape of the 2026-09-21 incident: Scheduler sent
+        12 real emails duplicating touches already sent 2026-08-24 and
+        2026-09-15, because the per-run mailbox/CRM check that should have
+        caught it was skipped under context pressure. A prompt-level
+        instruction to check first is precisely what got skipped, twice,
+        six weeks apart (see ``send_email``'s ``source_draft_id``
+        docstring) -- so this check runs unconditionally inside the send
+        path itself, not as a step a caller has to remember.
+
+        Searches each recipient's Sent history independently (Zoho's
+        search has no OR-across-recipients syntax) and stops at the first
+        match, since one confirmed duplicate is enough to refuse the send.
+
+        Args:
+            to: the recipients the new message is about to go to.
+            subject: the new message's subject line.
+
+        Returns:
+            ``None`` if no matching prior Sent message was found for any
+            recipient. Otherwise ``{"id", "date", "to_matched"}`` for the
+            first match.
+        """
+        target = self._normalized_subject(subject)
+        if not target:
+            # An empty/whitespace-only subject can't be compared
+            # meaningfully -- every Sent message would either match or
+            # none would, neither of which is a useful signal here.
+            return None
+        for address in _join_addresses(to).split(","):
+            address = address.strip()
+            if not address:
+                continue
+            try:
+                results = await self.search_emails(
+                    query=f"in:Sent::entire:{address}", limit=50
+                )
+            except ZohoAPIError:
+                # A malformed/unsearchable address shouldn't block a send
+                # whose recipient validation happens elsewhere (_compose);
+                # this check is a best-effort safety net, not the only
+                # gate on the recipient itself.
+                continue
+            for item in results:
+                if self._normalized_subject(item["subject"]) != target:
+                    continue
+                if not any(
+                    address.casefold() == recipient.casefold()
+                    for recipient in item["to"]
+                ):
+                    continue
+                return {
+                    "id": item["id"],
+                    "date": item["date"],
+                    "to_matched": address,
+                }
+        return None
+
     async def send_email(
         self,
         to: list[str],
         subject: str,
-        content: str,
+        content: str | None = None,
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
         include_signature: bool = False,
+        source_draft_id: str | None = None,
+        source_folder_id: str | None = None,
+        force_duplicate: bool = False,
     ) -> dict:
         """Send an email, or save it as a draft when sending is disabled.
 
@@ -2060,6 +2144,9 @@ class ZohoClient:
         cannot say "send".
 
         Args:
+            content: the body to send, authored as plain text with bare
+                "\\n" line breaks. Mutually exclusive with
+                ``source_draft_id`` -- give exactly one.
             include_signature: append the account's configured signature
                 card (an inline image) to the sent message. Verified live
                 2026-09-08 to work when the message actually sends
@@ -2082,6 +2169,32 @@ class ZohoClient:
                 whenever this flag switches the format to html -- the
                 plain-text path (``include_signature=False``) is
                 unaffected and still sent verbatim.**
+            source_draft_id: send the real, already-composed body of an
+                existing draft, fetched from Zoho by this call rather
+                than retyped by the caller. Mutually exclusive with
+                ``content`` -- give exactly one. Added after a real,
+                repeat incident: an LLM caller twice reconstructed a
+                drafted email from memory/CRM fields instead of copying
+                the actual draft verbatim (2026-08-10, Nopalera; recurred
+                2026-09-21, Bask and Lather Co, six weeks after the first
+                occurrence was documented and a prompt-level fix was
+                written). A prompt instruction to "always fetch and send
+                the real draft" is exactly the step that got skipped both
+                times under context pressure. This closes it structurally
+                instead: when set, this method fetches the draft's own
+                content from Zoho itself and sends exactly that, so there
+                is no step in the path where a caller could type
+                something else. Requires ``source_folder_id`` alongside
+                it. The caller still supplies ``to``/``subject`` (and
+                ``cc``/``bcc``) -- those aren't where the paraphrasing
+                incidents happened, and requiring the caller to have
+                already looked the draft up (to know its id and folder)
+                means they've already seen the real recipient.
+            source_folder_id: the folder the draft in ``source_draft_id``
+                lives in (from ``list_emails``/``search_emails``).
+                Required together with ``source_draft_id``.
+            force_duplicate: bypass the duplicate-send guard below. Off
+                by default; set it only for a deliberate, known resend.
 
         Args (remaining): same as ``create_draft``.
 
@@ -2092,9 +2205,38 @@ class ZohoClient:
             send, and a caller that can't tell will claim it sent.
 
         Raises:
-            ZohoAPIError: if no recipient is given, or the Zoho Mail API
+            ZohoAPIError: if no recipient is given, if ``content`` and
+                ``source_draft_id`` are both given or both omitted, if
+                ``source_draft_id`` is given without ``source_folder_id``,
+                if a prior Sent message to the same recipient with the
+                same (Re:-stripped) subject is found and
+                ``force_duplicate`` is not set, or the Zoho Mail API
                 rejects or fails the request.
         """
+        if (content is None) == (source_draft_id is None):
+            raise ZohoAPIError(
+                "send_email requires exactly one of content or source_draft_id"
+            )
+        if source_draft_id is not None and not source_folder_id:
+            raise ZohoAPIError(
+                "source_folder_id is required together with source_draft_id"
+            )
+        if source_draft_id is not None:
+            fetched = await self.get_email(source_draft_id, source_folder_id)  # type: ignore[arg-type]
+            content = fetched["text"]
+        assert content is not None  # narrowed by the mutual-exclusion check above
+
+        if self._allow_auto_send and not force_duplicate:
+            duplicate = await self._find_duplicate_sent(to, subject)
+            if duplicate is not None:
+                raise ZohoAPIError(
+                    "send_email refused: a Sent message with the same "
+                    f"subject already went to {duplicate['to_matched']} on "
+                    f"{duplicate['date']} (id {duplicate['id']}). If this is "
+                    "a deliberate resend, call again with "
+                    "force_duplicate=True."
+                )
+
         if not self._allow_auto_send:
             # mail_format="plaintext": same defect and same fix as
             # create_draft (see that method's docstring) -- this gated

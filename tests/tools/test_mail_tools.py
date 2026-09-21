@@ -127,7 +127,16 @@ class FakeZohoClient:
         return self.compose_result
 
     async def send_email(
-        self, to, subject, content, cc=None, bcc=None, include_signature=False
+        self,
+        to,
+        subject,
+        content=None,
+        cc=None,
+        bcc=None,
+        include_signature=False,
+        source_draft_id=None,
+        source_folder_id=None,
+        force_duplicate=False,
     ):
         self.send_email_calls.append(
             {
@@ -137,6 +146,9 @@ class FakeZohoClient:
                 "cc": cc,
                 "bcc": bcc,
                 "include_signature": include_signature,
+                "source_draft_id": source_draft_id,
+                "source_folder_id": source_folder_id,
+                "force_duplicate": force_duplicate,
             }
         )
         return self.compose_result

@@ -331,19 +331,33 @@ async def send_email(
     client: ZohoClient,
     to: list[str],
     subject: str,
-    content: str,
+    content: str | None = None,
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
     include_signature: bool = False,
+    source_draft_id: str | None = None,
+    source_folder_id: str | None = None,
+    force_duplicate: bool = False,
 ) -> dict:
     """Send an email, unless the server has sending disabled -- in which
     case the message is saved to Drafts instead (``ZOHO_ALLOW_AUTO_SEND``).
 
     Args:
+        content: the body to send. Give exactly one of this or
+            ``source_draft_id``.
         include_signature: append the account's configured signature card
             (an inline image) to the message. Only takes effect on a real
             send -- it's a silent no-op on the gated Drafts fallback,
             which intentionally never carries a signature.
+        source_draft_id: send an existing draft's real content instead of
+            typed ``content`` -- the server fetches it from Zoho itself,
+            so nothing gets retyped in between. Requires
+            ``source_folder_id``. Prefer this whenever the email being
+            sent already exists as a draft.
+        source_folder_id: the folder ``source_draft_id`` lives in.
+        force_duplicate: bypass the duplicate-send guard (a prior Sent
+            message to the same recipient with the same subject). Off by
+            default -- only set it for a deliberate, known resend.
         (remaining args): same as ``create_draft``.
 
     Returns:
@@ -351,8 +365,9 @@ async def send_email(
         drafted rather than sent.
 
     Raises:
-        ZohoAPIError: if no recipient is given, or the Zoho Mail API
-            rejects or fails the request.
+        ZohoAPIError: if no recipient is given, if ``content`` and
+            ``source_draft_id`` are both given or both omitted, or the
+            Zoho Mail API rejects or fails the request.
     """
     return await client.send_email(
         to=to,
@@ -361,6 +376,9 @@ async def send_email(
         cc=cc,
         bcc=bcc,
         include_signature=include_signature,
+        source_draft_id=source_draft_id,
+        source_folder_id=source_folder_id,
+        force_duplicate=force_duplicate,
     )
 
 
