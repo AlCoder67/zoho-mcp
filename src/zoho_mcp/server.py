@@ -491,10 +491,13 @@ def create_server(
     async def send_email(
         to: list[str],
         subject: str,
-        content: str,
+        content: str | None = None,
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
         include_signature: bool = False,
+        source_draft_id: str | None = None,
+        source_folder_id: str | None = None,
+        force_duplicate: bool = False,
     ) -> dict:
         """Send an email. Usually DISABLED -- then it saves a draft instead.
 
@@ -522,6 +525,27 @@ def create_server(
         Drafts fallback above, which intentionally never carries a
         signature (drafts are meant to be reviewed as plain content
         before the operator decides to send).
+
+        WHEN AN EMAIL ALREADY EXISTS AS A DRAFT, PREFER source_draft_id
+        OVER RETYPING content. Give exactly one of ``content`` or
+        ``source_draft_id`` (with its matching ``source_folder_id``) --
+        never both, never neither. Composing a fresh ``content`` string
+        from memory, a CRM field, or a summary of a draft is exactly how
+        two real incidents happened: a real sent email diverged from its
+        intended draft (2026-08-10), and it recurred six weeks after that
+        was documented and supposedly fixed (2026-09-21). Passing
+        ``source_draft_id`` makes this impossible structurally -- the
+        server fetches the draft's own text and sends exactly that, so
+        there is nothing left to paraphrase.
+
+        This call also refuses to send if a Sent message with the same
+        subject already went to the same recipient -- that guard is what
+        caught the 2026-09-21 incident (12 duplicate sends) after the
+        fact; it now runs before every real send, not just when someone
+        remembers to check. If this refusal fires and the resend is
+        genuinely deliberate (confirmed with the user, not inferred), set
+        force_duplicate=True and call again -- don't work around it by
+        editing the subject line to dodge the match.
         """
         return await mail_tools.send_email(
             client,
@@ -531,6 +555,9 @@ def create_server(
             cc=cc,
             bcc=bcc,
             include_signature=include_signature,
+            source_draft_id=source_draft_id,
+            source_folder_id=source_folder_id,
+            force_duplicate=force_duplicate,
         )
 
     @mcp.tool(title="Mark email as read", annotations=_MAIL_UPDATE)
