@@ -2276,6 +2276,48 @@ class ZohoClient:
         )
         return {**sent, "sent": True}
 
+    async def _refuse_self_addressed_reply(self, message_id: str) -> None:
+        """Raise if the message being replied to was sent by our own mailbox.
+
+        Reads only the original's headers (the same account-scoped
+        ``originalmessage`` endpoint ``get_email_source`` uses), so this
+        costs one lightweight header-only request, not a full body fetch.
+        Compares case-insensitively since header addresses aren't
+        guaranteed a consistent case.
+
+        Deliberately does not try to special-case "replying to your own
+        Sent copy is fine sometimes" -- there is no legitimate reason for
+        this pipeline to reply to its own outbound mail, and the one time
+        it happened it was a bug, not an intentional case.
+        """
+        account_id = await self._get_account_id()
+        payload = await self._get(
+            f"{ZOHO_MAIL_BASE_URL}/accounts/{account_id}"
+            f"/messages/{message_id}/originalmessage"
+        )
+        data = payload.get("data")
+        source = data.get("content") if isinstance(data, dict) else None
+        if not isinstance(source, str):
+            # Same header-only read reply_draft would need anyway --- if it's
+            # unreadable here, the reply is about to fail regardless.
+            return
+        try:
+            parsed = email.parser.HeaderParser().parsestr(source)
+        except MALFORMED_DATA_ERRORS:
+            return
+        original_from = parsed.get("From", "")
+        our_address = await self._get_from_address()
+        if our_address and our_address.lower() in original_from.lower():
+            raise ZohoAPIError(
+                "Refusing to draft a reply: the message being replied to "
+                f"(id={message_id}) was sent by our own mailbox "
+                f"({our_address}), not by a brand or creator. This is the "
+                "exact shape of the 2026-09-24 self-addressed-draft "
+                "incident -- replying to our own prior Sent mail instead "
+                "of a real inbound message. Use create_draft with the "
+                "real contact's address instead."
+            )
+
     async def reply_draft(
         self,
         message_id: str,
@@ -2289,6 +2331,12 @@ class ZohoClient:
         an incoming message, which is exactly the content most likely to
         carry an injected instruction, so they always land in Drafts for
         a human to review.
+
+        Refuses before composing anything if the message being replied to
+        was itself sent by this mailbox (see ``_refuse_self_addressed_
+        reply`` below) -- this is a code-level gate, not a caller
+        convention, because a caller convention is exactly what already
+        failed here once.
 
         Args:
             message_id: the email being replied to, from ``search_emails``
@@ -2307,11 +2355,22 @@ class ZohoClient:
             ``{"id": ...}`` -- the new draft's message id.
 
         Raises:
-            ZohoAPIError: if ``content`` is blank, or the Zoho Mail API
-                rejects or fails the request.
+            ZohoAPIError: if ``content`` is blank, the message being
+                replied to was sent by our own mailbox, or the Zoho Mail
+                API rejects or fails the request.
         """
         if not content.strip():
             raise ZohoAPIError("content must not be blank")
+        # Real incident, Monarc Media, 2026-09-24: a caller used reply_draft
+        # against our own prior Sent-folder copy of a message (there was no
+        # real inbound reply to work with). Zoho addresses a reply back to
+        # the ORIGINAL message's sender -- for our own outbound mail, that
+        # sender is us, so the resulting draft was addressed from us to
+        # ourselves. Six real drafts reached that state live before anyone
+        # caught it. Checked here, once, at the chokepoint every caller
+        # goes through -- not left as an instruction for each caller to
+        # remember, because that is exactly what failed the first time.
+        await self._refuse_self_addressed_reply(message_id)
         body = {
             "fromAddress": await self._get_from_address(),
             "content": _plaintext_to_safe_html(content) if rich_text else content,

@@ -87,6 +87,34 @@ def mock_no_duplicate_sent(respx_mock):
     ).mock(return_value=httpx.Response(200, json={"data": []}))
 
 
+def mock_reply_original_from(respx_mock, *, sender="brand@example.com", message_id="m-1"):
+    """The `originalmessage` header read reply_draft's self-address guard
+    (``_refuse_self_addressed_reply``) makes before composing anything.
+    Defaults to a real brand sender so ordinary reply_draft tests that
+    aren't about the guard keep passing unchanged; pass the account's own
+    ``mailboxAddress`` to exercise the refusal path instead.
+    """
+    return respx_mock.get(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/{message_id}"
+        f"/originalmessage"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "content": (
+                        f"From: {sender}\r\n"
+                        "To: me@example.com\r\n"
+                        "Subject: Collab?\r\n"
+                        "\r\n"
+                        "Body\r\n"
+                    )
+                }
+            },
+        )
+    )
+
+
 def mock_pacific_accounts_endpoint(respx_mock):
     return respx_mock.get("https://mail.zoho.com/api/accounts").mock(
         return_value=httpx.Response(
@@ -3485,6 +3513,7 @@ async def test_reply_draft_sets_both_action_reply_and_mode_draft(
             },
         )
     )
+    mock_reply_original_from(respx_mock)
     route = respx_mock.post(
         f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/m-1"
     ).mock(
@@ -3499,6 +3528,78 @@ async def test_reply_draft_sets_both_action_reply_and_mode_draft(
     assert sent["content"] == "Sure thing"
     assert sent["mailFormat"] == "plaintext"
     assert result == {"id": "msg-reply-1"}
+
+
+async def test_reply_draft_refuses_when_original_sender_is_our_own_mailbox(
+    respx_mock, zoho_client
+):
+    # Real incident, Monarc Media, 2026-09-24: an orphaned-draft backstop
+    # called reply_draft on our own prior Sent copy for a brand that had
+    # never actually replied. Zoho addresses a reply back to the ORIGINAL
+    # message's sender -- for our own outbound mail, that sender is us.
+    # Six real drafts went out addressed from partnerships@monarcmediahq.com
+    # to itself before anyone caught it. This is the code-level gate: refuse
+    # before composing, rather than relying on every caller remembering to
+    # check by hand.
+    respx_mock.get("https://mail.zoho.com/api/accounts").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "accountId": ACCOUNT_ID,
+                        "isDefaultAccount": True,
+                        "timeZone": "America/Los_Angeles",
+                        "primaryEmailAddress": "personal@example.com",
+                        "mailboxAddress": "me@example.com",
+                    }
+                ]
+            },
+        )
+    )
+    mock_reply_original_from(respx_mock, sender="me@example.com")
+    post = respx_mock.post(f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages")
+
+    with pytest.raises(ZohoAPIError, match="own mailbox"):
+        await zoho_client.reply_draft(message_id="m-1", content="Sure thing")
+
+    # Nothing half-composed: a failed self-address check must not draft anyway.
+    assert not post.called
+
+
+async def test_reply_draft_allows_when_original_sender_is_a_real_brand(
+    respx_mock, zoho_client
+):
+    # Companion to the guard test above: a normal reply to a real inbound
+    # message (sender isn't our own mailbox) must still work exactly as
+    # before -- the guard must not false-positive on legitimate replies.
+    respx_mock.get("https://mail.zoho.com/api/accounts").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "accountId": ACCOUNT_ID,
+                        "isDefaultAccount": True,
+                        "timeZone": "America/Los_Angeles",
+                        "primaryEmailAddress": "personal@example.com",
+                        "mailboxAddress": "me@example.com",
+                    }
+                ]
+            },
+        )
+    )
+    mock_reply_original_from(respx_mock, sender="brand@example.com")
+    route = respx_mock.post(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/m-1"
+    ).mock(
+        return_value=httpx.Response(200, json={"data": {"messageId": "msg-reply-ok"}})
+    )
+
+    result = await zoho_client.reply_draft(message_id="m-1", content="Sure thing")
+
+    assert route.called
+    assert result == {"id": "msg-reply-ok"}
 
 
 async def test_reply_draft_always_sets_mail_format_plaintext(respx_mock, zoho_client):
@@ -3531,6 +3632,7 @@ async def test_reply_draft_always_sets_mail_format_plaintext(respx_mock, zoho_cl
         return_value=httpx.Response(200, json={"data": {"messageId": "msg-reply-2"}})
     )
 
+    mock_reply_original_from(respx_mock)
     await zoho_client.reply_draft(message_id="m-1", content="Sure thing")
 
     sent = json.loads(route.calls.last.request.content)
@@ -3560,6 +3662,7 @@ async def test_reply_draft_rich_text_sets_mail_format_html(respx_mock, zoho_clie
         return_value=httpx.Response(200, json={"data": {"messageId": "msg-reply-3"}})
     )
 
+    mock_reply_original_from(respx_mock)
     await zoho_client.reply_draft(
         message_id="m-1", content="Line one\nLine two", rich_text=True
     )
@@ -3590,6 +3693,7 @@ async def test_reply_draft_uses_reply_all_action_when_asked(respx_mock, zoho_cli
         f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/m-1"
     ).mock(return_value=httpx.Response(200, json={"data": {"messageId": "r-1"}}))
 
+    mock_reply_original_from(respx_mock)
     await zoho_client.reply_draft(message_id="m-1", content="Sure", reply_all=True)
 
     assert json.loads(route.calls.last.request.content)["action"] == "replyall"
@@ -4124,6 +4228,7 @@ async def test_reply_draft_still_sets_mode_draft_when_auto_send_enabled(
         f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/m-1"
     ).mock(return_value=httpx.Response(200, json={"data": {"messageId": "r-1"}}))
 
+    mock_reply_original_from(respx_mock)
     await sending_client.reply_draft(message_id="m-1", content="Sure")
 
     sent = json.loads(route.calls.last.request.content)
