@@ -5,6 +5,7 @@ bodies, event timestamps) into the compact, LLM-facing shapes used by the
 MCP tools happens here and only here.
 """
 
+import difflib
 import email.header
 import email.parser
 import html
@@ -2035,6 +2036,15 @@ class ZohoClient:
         )
 
     _RE_PREFIX_RE = re.compile(r"^(?:re|fwd?)\s*:\s*", re.IGNORECASE)
+    # Below this, two Sent bodies are "different enough" to be different
+    # sequence stages rather than the same touch resent. Chosen, not
+    # measured: high enough that two independently-drafted stages (Day 4
+    # vs Day 16, wholly different copy) never falsely match, low enough
+    # that a genuine resend still matches despite Zoho appending a
+    # signature image to the SENT copy that the pre-send draft/typed
+    # content never contained (see ``_find_duplicate_sent``). Revisit if
+    # a real near-miss surfaces on either side.
+    DUPLICATE_CONTENT_SIMILARITY_THRESHOLD = 0.6
 
     @classmethod
     def _normalized_subject(cls, subject: str) -> str:
@@ -2053,10 +2063,20 @@ class ZohoClient:
             stripped = new
         return " ".join(stripped.split()).casefold()
 
+    @staticmethod
+    def _normalized_body(text: str) -> str:
+        """Collapse whitespace and casefold a body for similarity comparison."""
+        return " ".join(text.split()).casefold()
+
+    @staticmethod
+    def _content_similarity(a: str, b: str) -> float:
+        """Ratio in [0, 1]; 1.0 means identical after normalization."""
+        return difflib.SequenceMatcher(a=a, b=b).ratio()
+
     async def _find_duplicate_sent(
-        self, to: list[str], subject: str
+        self, to: list[str], subject: str, content: str
     ) -> dict[str, str] | None:
-        """Look for a prior Sent message to any of ``to`` with the same subject.
+        """Look for a prior Sent message to any of ``to`` with the same touch.
 
         Guards the exact shape of the 2026-09-21 incident: Scheduler sent
         12 real emails duplicating touches already sent 2026-08-24 and
@@ -2067,25 +2087,49 @@ class ZohoClient:
         docstring) -- so this check runs unconditionally inside the send
         path itself, not as a step a caller has to remember.
 
+        Subject alone is not enough: this system's own Day 4/9/16
+        follow-up sequence deliberately reuses the identical "Re: <Day 1
+        subject>" line at every stage, by design, so a subject-only match
+        cannot distinguish "this exact stage already went out" from "an
+        earlier stage in the same thread already went out" -- confirmed
+        live 2026-09-24/25, where this guard's first version refused 6
+        genuinely-due Day 16 sends because their Day 9 touch shared the
+        same subject (dashboard/incidents.json id 118,
+        Monarc-Operations msg-2026-09-24-019). A subject match is
+        therefore only a cheap prefilter here; a match additionally
+        fetches the candidate's real Sent body and requires it to be
+        substantially similar (``DUPLICATE_CONTENT_SIMILARITY_THRESHOLD``)
+        to the message about to be sent before refusing. Different
+        sequence stages are independently drafted copy and score low;
+        the same stage resent -- even with Zoho's server-side signature
+        image appended to the earlier Sent copy but not to a fresh draft
+        -- still scores well above threshold, because that signature is a
+        small fraction of a real multi-paragraph body.
+
         Searches each recipient's Sent history independently (Zoho's
         search has no OR-across-recipients syntax) and stops at the first
-        match, since one confirmed duplicate is enough to refuse the send.
+        confirmed match, since one is enough to refuse the send.
 
         Args:
             to: the recipients the new message is about to go to.
             subject: the new message's subject line.
+            content: the new message's resolved body (already fetched
+                from the draft when ``source_draft_id`` was used) --
+                compared against each subject-matching candidate's real
+                Sent content, not against ``subject`` a second time.
 
         Returns:
             ``None`` if no matching prior Sent message was found for any
             recipient. Otherwise ``{"id", "date", "to_matched"}`` for the
             first match.
         """
-        target = self._normalized_subject(subject)
-        if not target:
+        target_subject = self._normalized_subject(subject)
+        if not target_subject:
             # An empty/whitespace-only subject can't be compared
             # meaningfully -- every Sent message would either match or
             # none would, neither of which is a useful signal here.
             return None
+        target_content = self._normalized_body(content)
         for address in _join_addresses(to).split(","):
             address = address.strip()
             if not address:
@@ -2101,12 +2145,23 @@ class ZohoClient:
                 # gate on the recipient itself.
                 continue
             for item in results:
-                if self._normalized_subject(item["subject"]) != target:
+                if self._normalized_subject(item["subject"]) != target_subject:
                     continue
                 if not any(
                     address.casefold() == recipient.casefold()
                     for recipient in item["to"]
                 ):
+                    continue
+                # Subject+recipient is only a prefilter (see docstring) --
+                # confirm with the candidate's real body before refusing.
+                try:
+                    candidate = await self.get_email(item["id"], item["folder_id"])
+                except ZohoAPIError:
+                    continue
+                similarity = self._content_similarity(
+                    target_content, self._normalized_body(candidate["text"])
+                )
+                if similarity < self.DUPLICATE_CONTENT_SIMILARITY_THRESHOLD:
                     continue
                 return {
                     "id": item["id"],
@@ -2227,11 +2282,12 @@ class ZohoClient:
         assert content is not None  # narrowed by the mutual-exclusion check above
 
         if self._allow_auto_send and not force_duplicate:
-            duplicate = await self._find_duplicate_sent(to, subject)
+            duplicate = await self._find_duplicate_sent(to, subject, content)
             if duplicate is not None:
                 raise ZohoAPIError(
                     "send_email refused: a Sent message with the same "
-                    f"subject already went to {duplicate['to_matched']} on "
+                    f"subject AND substantially similar content already went "
+                    f"to {duplicate['to_matched']} on "
                     f"{duplicate['date']} (id {duplicate['id']}). If this is "
                     "a deliberate resend, call again with "
                     "force_duplicate=True."
