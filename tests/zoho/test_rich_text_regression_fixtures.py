@@ -75,7 +75,7 @@ Tone: credibility-led, direct"""
 NUTRIRE_DRAFT_EXPECTED_HTML = (
     "<p>Hi Jessica,</p>"
     "<p>Nutrire just landed its first-ever retail door — a nationwide launch"
-    " with Ulta Beauty, part of Ulta&#x27;s &quot;Sparked&quot; early-stage"
+    " with Ulta Beauty, part of Ulta's \"Sparked\" early-stage"
     " program, in-store since 8/23. First retail placement is a real"
     " inflection point for a brand this young.</p>"
     "<p>The shelf-to-TikTok discovery window is open right now. A shopper"
@@ -89,22 +89,22 @@ NUTRIRE_DRAFT_EXPECTED_HTML = (
     " below. No ask, just showing the thinking.</p>"
     "<p>Ofentse Shuping | Monarc Media<br>monarcmediahq.com</p>"
     "<p>---</p>"
-    '<p>SCRIPT 1: &quot;First time on a shelf&quot;</p>'
-    "<p>Hook (0-3s): &quot;This brand&#x27;s never been in a store before."
-    " Now it&#x27;s at Ulta.&quot;</p>"
+    '<p>SCRIPT 1: "First time on a shelf"</p>'
+    "<p>Hook (0-3s): \"This brand's never been in a store before."
+    " Now it's at Ulta.\"</p>"
     "<p>Middle (3-15s): Creator picks the product off an Ulta shelf, talks"
-    " about it being Nutrire&#x27;s first retail door, does a quick"
+    " about it being Nutrire's first retail door, does a quick"
     " application/demo.</p>"
-    '<p>CTA (last 3s): &quot;At Ulta now, nationwide.&quot;</p>'
+    '<p>CTA (last 3s): "At Ulta now, nationwide."</p>'
     "<p>Format: TikTok organic</p>"
     "<p>Tone: discovery, milestone-forward</p>"
-    '<p>SCRIPT 2: &quot;Salon-incubated, now on shelf&quot;</p>'
-    "<p>Hook (0-3s): &quot;This was built inside an actual salon before it"
-    " ever hit a store.&quot;</p>"
+    '<p>SCRIPT 2: "Salon-incubated, now on shelf"</p>'
+    "<p>Hook (0-3s): \"This was built inside an actual salon before it"
+    " ever hit a store.\"</p>"
     "<p>Middle (3-15s): Creator explains the Tricoci Salon &amp; Spa"
     " incubation origin, demos the product, talks through what that"
     " background means for the formulation.</p>"
-    '<p>CTA (last 3s): &quot;Find it at Ulta.&quot;</p>'
+    '<p>CTA (last 3s): "Find it at Ulta."</p>'
     "<p>Format: Meta feed</p>"
     "<p>Tone: credibility-led, direct</p>"
 )
@@ -156,12 +156,12 @@ monarcmediahq.com"""
 RAFAEL_REPLY_EXPECTED_HTML = (
     "<p>Hi Rafael,</p>"
     "<p>Thanks for reaching out. Travel and tech/apps are real categories"
-    " we work in, so there&#x27;s a plausible fit here.</p>"
+    " we work in, so there's a plausible fit here.</p>"
     "<p>Before going further, could you send a couple of example videos"
     " directly — actual finished UGC, not just a portfolio link?"
     " Specifically anything in the tech/app or travel space would be most"
     " useful to see.</p>"
-    "<p>Once I&#x27;ve had a look, I&#x27;ll follow up on next steps.</p>"
+    "<p>Once I've had a look, I'll follow up on next steps.</p>"
     "<p>Ofentse Shuping | Monarc Media<br>monarcmediahq.com</p>"
 )
 
@@ -261,5 +261,9 @@ def test_html_special_characters_are_always_escaped():
     assert "<script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "A &amp; B" in html
-    assert "&quot;quoted&quot;" in html
-    assert "&#x27;single&#x27;" in html
+    # Quotes stay as-is (2026-09-30): only dangerous inside an attribute, and the converter never
+    # writes one. The only markup allowed in the output is the <p>/<br> it adds itself.
+    assert "\"quoted\"" in html
+    assert "'single'" in html
+    import re
+    assert set(re.findall(r"<(/?\w+)", html)) <= {"p", "/p", "br"}

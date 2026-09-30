@@ -447,7 +447,12 @@ def _plaintext_to_safe_html(content: str) -> str:
     Returns:
         An HTML fragment safe to pass as ``mail_format="html"`` content.
     """
-    lines = [html.escape(line) for line in content.split("\n")]
+    # quote=False on purpose (2026-09-30): quotes/apostrophes only need escaping inside an HTML
+    # attribute, and this function never writes one. Escaping them put literal "&#x27;" and
+    # "&quot;" into the text/plain alternative Zoho derives from the HTML part (confirmed in raw
+    # MIME), which plain-text clients and notification previews show verbatim. & < > stay
+    # escaped, so caller content still cannot inject a tag.
+    lines = [html.escape(line, quote=False) for line in content.split("\n")]
     paragraphs: list[str] = []
     i = 0
     while i < len(lines):
