@@ -1966,7 +1966,7 @@ class ZohoClient:
         content: str,
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
-        rich_text: bool = False,
+        rich_text: bool = True,
     ) -> dict:
         """Save an email as a draft. Never sends, and is never gated.
 
@@ -1977,9 +1977,9 @@ class ZohoClient:
                 "\\n" line breaks (this is true regardless of
                 ``rich_text`` -- see below).
             cc/bcc: optional additional recipients.
-            rich_text: opt-in, defaults to False. False (the default)
-                keeps the existing, tested plaintext path unchanged --
-                see the plaintext note below. True requests HTML
+            rich_text: defaults to True (hard-coded default, owner decision
+                2026-09-30). False is an explicit per-call opt-out to the
+                plaintext path -- see the plaintext note below. True requests HTML
                 rendering: ``content`` is still authored as plain text
                 with bare "\\n", and this method converts it to safe
                 HTML itself (escaping, then "\\n\\n" -> paragraph break,
@@ -2379,7 +2379,7 @@ class ZohoClient:
         message_id: str,
         content: str,
         reply_all: bool = False,
-        rich_text: bool = False,
+        rich_text: bool = True,
     ) -> dict:
         """Save a reply to an existing email as a draft. Never sends.
 
@@ -2402,7 +2402,7 @@ class ZohoClient:
                 is set. Never the quoted original, which Zoho appends
                 separately and which this never touches.
             reply_all: reply to every recipient rather than just the sender.
-            rich_text: opt-in, defaults to False. Same behavior as
+            rich_text: defaults to True. Same behavior as
                 ``create_draft``'s ``rich_text`` -- see that docstring.
                 Applies only to this new reply text; the quoted original
                 message is untouched either way.

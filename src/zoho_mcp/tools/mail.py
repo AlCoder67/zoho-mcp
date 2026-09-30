@@ -226,7 +226,7 @@ async def create_draft(
     content: str,
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
-    rich_text: bool = False,
+    rich_text: bool = True,
 ) -> dict:
     """Save an email as a draft. Never sends.
 
@@ -237,13 +237,13 @@ async def create_draft(
         content: the message body, authored as plain text with bare
             "\\n" line breaks -- true whether or not ``rich_text`` is set.
         cc/bcc: optional additional recipients.
-        rich_text: opt-in, defaults to False. False keeps the existing
+        rich_text: defaults to True (rich text is the hard-coded default). False opts out to the existing
             plaintext rendering. True renders the same plain-text
             content as real paragraphs/line breaks in the recipient's
             client instead of Zoho's monospace-looking plaintext view --
             still authored the same way, just displayed with normal text
-            formatting. Leave this off unless the user has specifically
-            asked for richer-looking formatting.
+            formatting. Do not pass False unless plain text was
+            specifically requested.
 
     Returns:
         ``{"id": ...}`` -- the new draft's message id.
@@ -262,7 +262,7 @@ async def reply_draft(
     message_id: str,
     content: str,
     reply_all: bool = False,
-    rich_text: bool = False,
+    rich_text: bool = True,
 ) -> dict:
     """Save a reply to an existing email as a draft. Never sends.
 
@@ -272,7 +272,7 @@ async def reply_draft(
         content: the new reply text, plain text with bare "\\n" line
             breaks -- true whether or not ``rich_text`` is set.
         reply_all: reply to all recipients rather than just the sender.
-        rich_text: opt-in, defaults to False. See ``create_draft``'s
+        rich_text: defaults to True. See ``create_draft``'s
             ``rich_text`` for what it does; applies only to this new
             reply text, never the quoted original message.
 

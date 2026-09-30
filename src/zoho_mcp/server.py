@@ -386,7 +386,7 @@ def create_server(
         content: str,
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
-        rich_text: bool = False,
+        rich_text: bool = True,
     ) -> dict:
         """Save an email as a draft in Zoho Mail. Does NOT send it.
 
@@ -394,11 +394,11 @@ def create_server(
         subject / content: the subject line and message body, authored
         as plain text with bare "\\n" line breaks either way.
         cc / bcc (optional): additional recipients.
-        rich_text (optional, default False): render the same content
+        rich_text (optional, default True): render the same content
         with real paragraph/line-break formatting instead of Zoho's
         plaintext view. Content is still written the same way -- this
-        only changes how it displays. Leave off unless richer-looking
-        formatting was specifically requested.
+        only changes how it displays. Rich text is the default; do
+        not pass False unless plain text was specifically requested.
 
         This is the right tool for essentially every "write an email" or
         "reply to this" request: it leaves the message in Drafts for the
@@ -419,7 +419,7 @@ def create_server(
         message_id: str,
         content: str,
         reply_all: bool = False,
-        rich_text: bool = False,
+        rich_text: bool = True,
     ) -> dict:
         """Save a reply to an existing email as a draft. Does NOT send it.
 
@@ -429,10 +429,11 @@ def create_server(
         "\\n" line breaks either way. Never the quoted original message.
         reply_all (optional): reply to every recipient instead of just
         the sender.
-        rich_text (optional, default False): render this new reply text
+        rich_text (optional, default True): render this new reply text
         with real paragraph/line-break formatting instead of plaintext.
-        Only affects this new text, never the quoted original. Leave off
-        unless richer-looking formatting was specifically requested.
+        Only affects this new text, never the quoted original. Rich text
+        is the default; do not pass False unless plain text was
+        specifically requested.
 
         Returns {"id": ...}. There is no send-a-reply tool by design --
         replies quote incoming mail, so they always land in Drafts for a

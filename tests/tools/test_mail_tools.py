@@ -418,7 +418,7 @@ async def test_create_draft_delegates_to_client():
             "content": "B",
             "cc": ["c@x.com"],
             "bcc": None,
-            "rich_text": False,
+            "rich_text": True,
         }
     ]
     assert result == client.compose_result
@@ -440,7 +440,7 @@ async def test_reply_draft_delegates_to_client():
     await reply_draft(client, message_id="m-1", content="B", reply_all=True)
 
     assert client.reply_draft_calls == [
-        {"message_id": "m-1", "content": "B", "reply_all": True, "rich_text": False}
+        {"message_id": "m-1", "content": "B", "reply_all": True, "rich_text": True}
     ]
 
 

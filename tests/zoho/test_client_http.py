@@ -3088,15 +3088,17 @@ async def test_create_draft_builds_the_expected_payload(respx_mock, zoho_client)
         "fromAddress": "me@example.com",
         "toAddress": "a@example.com,b@example.com",
         "subject": "Hi",
-        "content": "Body",
-        "mailFormat": "plaintext",
+        "content": "<p>Body</p>",
+        "mailFormat": "html",
         "ccAddress": "c@example.com",
         "bccAddress": "d@example.com",
     }
     assert result == {"id": "msg-new-1"}
 
 
-async def test_create_draft_always_sets_mail_format_plaintext(respx_mock, zoho_client):
+async def test_create_draft_opt_out_always_sets_mail_format_plaintext(
+    respx_mock, zoho_client
+):
     # Zoho's compose endpoint defaults mailFormat to "html" when omitted,
     # and every draft/reply body here is authored as plain text with bare
     # "\n" line breaks -- which HTML collapses into one run-on line (bare
@@ -3109,7 +3111,9 @@ async def test_create_draft_always_sets_mail_format_plaintext(respx_mock, zoho_c
     # break to every consumer. Never omit this on create_draft/reply_draft.
     route = mock_compose_endpoints(respx_mock)
 
-    await zoho_client.create_draft(to=["a@example.com"], subject="Hi", content="B")
+    await zoho_client.create_draft(
+        to=["a@example.com"], subject="Hi", content="B", rich_text=False
+    )
 
     sent = json.loads(route.calls.last.request.content)
     assert sent["mailFormat"] == "plaintext"
@@ -3146,12 +3150,29 @@ async def test_create_draft_works_without_auto_send_enabled(respx_mock, zoho_cli
     assert route.called
 
 
-async def test_create_draft_default_stays_plaintext(respx_mock, zoho_client):
-    # rich_text defaults to False; the tested plaintext path from the
-    # 2026-09-10 fix must be completely unaffected by rich_text existing.
+async def test_create_draft_default_is_rich_text(respx_mock, zoho_client):
+    # Owner decision 2026-09-30: rich text is the hard-coded default for every
+    # draft. An omitted rich_text must produce real HTML, never the plaintext
+    # view, and must never regress into the 2026-09-10 collapsed-paragraph bug.
     route = mock_compose_endpoints(respx_mock)
 
-    await zoho_client.create_draft(to=["a@example.com"], subject="Hi", content="B")
+    await zoho_client.create_draft(
+        to=["a@example.com"], subject="Hi", content="Line one\nLine two"
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["mailFormat"] == "html"
+    assert "<p>Line one</p>" in sent["content"]
+    assert "\n" not in sent["content"]
+
+
+async def test_create_draft_explicit_opt_out_keeps_plaintext(respx_mock, zoho_client):
+    # rich_text=False stays available as an explicit, per-call opt-out.
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(
+        to=["a@example.com"], subject="Hi", content="B", rich_text=False
+    )
 
     sent = json.loads(route.calls.last.request.content)
     assert sent["mailFormat"] == "plaintext"
@@ -3525,8 +3546,8 @@ async def test_reply_draft_sets_both_action_reply_and_mode_draft(
     sent = json.loads(route.calls.last.request.content)
     assert sent["action"] == "reply"
     assert sent["mode"] == "draft"  # never remove: without it Zoho SENDS
-    assert sent["content"] == "Sure thing"
-    assert sent["mailFormat"] == "plaintext"
+    assert sent["content"] == "<p>Sure thing</p>"
+    assert sent["mailFormat"] == "html"
     assert result == {"id": "msg-reply-1"}
 
 
@@ -3602,7 +3623,9 @@ async def test_reply_draft_allows_when_original_sender_is_a_real_brand(
     assert result == {"id": "msg-reply-ok"}
 
 
-async def test_reply_draft_always_sets_mail_format_plaintext(respx_mock, zoho_client):
+async def test_reply_draft_opt_out_always_sets_mail_format_plaintext(
+    respx_mock, zoho_client
+):
     # Same defect as create_draft (see test_create_draft_always_sets_mail_
     # format_plaintext): confirmed live 2026-09-10 that an omitted
     # mailFormat on a reply produces multipart/alternative with bare "\n"
@@ -3633,7 +3656,9 @@ async def test_reply_draft_always_sets_mail_format_plaintext(respx_mock, zoho_cl
     )
 
     mock_reply_original_from(respx_mock)
-    await zoho_client.reply_draft(message_id="m-1", content="Sure thing")
+    await zoho_client.reply_draft(
+        message_id="m-1", content="Sure thing", rich_text=False
+    )
 
     sent = json.loads(route.calls.last.request.content)
     assert sent["mailFormat"] == "plaintext"
