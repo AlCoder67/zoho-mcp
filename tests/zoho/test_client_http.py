@@ -4629,6 +4629,47 @@ async def test_send_email_with_source_draft_id_sends_the_drafts_real_content(
     assert result["sent"] is True
 
 
+async def test_send_email_from_draft_keeps_the_case_study_link_inline_in_its_sentence(
+    respx_mock, sending_client
+):
+    # 2026-10-01 mooncat: the draft HTML had the link inline in one paragraph, but the text re-sent
+    # from it was flattened with one line per text node, so "The full / case study / shows ..."
+    # went out as three paragraphs. The anchor must come back inline, in the same sentence.
+    url = "https://www.monarcmediahq.com/case-study-haruharu.html"
+    mock_no_duplicate_sent(respx_mock)
+    respx_mock.get(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}"
+        f"/folders/drafts-folder/messages/d-2/content"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "messageId": "d-2",
+                    "content": (
+                        "<p>Hi Camilla,</p>"
+                        f'<p>The full <a href="{url}">case study</a> shows one video we delivered.</p>'
+                        "<p>Ofentse Shuping | Monarc Media<br>monarcmediahq.com</p>"
+                    ),
+                }
+            },
+        )
+    )
+    route = mock_compose_endpoints(respx_mock)
+
+    await sending_client.send_email(
+        to=["camilla@example.com"],
+        subject="Case study",
+        source_draft_id="d-2",
+        source_folder_id="drafts-folder",
+        include_signature=True,
+    )
+
+    sent = json.loads(route.calls.last.request.content)["content"]
+    assert f'<p>The full <a href="{url}">case study</a> shows one video we delivered.</p>' in sent
+    assert "<p>The full</p>" not in sent and "<p>case study</p>" not in sent
+
+
 # --- send_email duplicate-send guard ---
 #
 # Guards the exact shape of the 2026-09-21 incident: Scheduler sent 12 real

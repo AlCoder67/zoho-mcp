@@ -665,6 +665,32 @@ def normalize_email_content(raw: dict, *, strip_invisible_chars: bool = False) -
         raise ZohoAPIError(f"Malformed email content from Zoho: {e}") from e
 
 
+_ANCHOR_RE = re.compile(r'<a\s+[^>]*?href="([^"]+)"[^>]*>(.*?)</a>', re.I | re.S)
+
+
+def _html_with_allowed_links_to_text(html_content: str) -> str:
+    """Flatten a draft's HTML to authored plain text, KEEPING allowlisted links inline.
+
+    ``normalize_email_content`` uses ``get_text(separator="\\n")``, which puts an inline
+    ``<a>`` on its own line ("The full\\ncase study\\nshows ..."). Re-sending that text broke the
+    sentence into three paragraphs (2026-10-01, mooncat). Before flattening, each ``<a href>``
+    whose URL is exactly an ``_ALLOWED_LINK_URLS`` entry is replaced by its ``[words](URL)``
+    authoring markup, which ``_plaintext_to_safe_html`` turns back into the same inline anchor.
+    Any other anchor is flattened as before (never re-emitted as a link).
+    """
+    # Substitute in the raw HTML, BEFORE parsing, so the markup stays inside the sentence's own
+    # text node (replacing a parsed <a> with a new string makes it a separate node, which
+    # get_text(separator="\\n") would split onto its own line again).
+    def repl(m: "re.Match[str]") -> str:
+        url, words = m.group(1), BeautifulSoup(m.group(2), "html.parser").get_text(strip=True)
+        if url in _ALLOWED_LINK_URLS and _LINK_MARKUP_RE.fullmatch(f"[{words}]({url})"):
+            return f"[{words}]({url})"
+        return m.group(0)
+
+    html_content = _ANCHOR_RE.sub(repl, html_content)
+    return BeautifulSoup(html_content, "html.parser").get_text(separator="\n", strip=True)
+
+
 def normalize_signature(raw: dict) -> dict:
     """Normalize one signature from Zoho Mail's Signature API.
 
@@ -2302,7 +2328,13 @@ class ZohoClient:
                 "source_folder_id is required together with source_draft_id"
             )
         if source_draft_id is not None:
-            fetched = await self.get_email(source_draft_id, source_folder_id)  # type: ignore[arg-type]
+            # The link-preserving fetch only when the body is rebuilt as HTML (include_signature): the
+            # [words](URL) markup becomes an anchor there, and would show as literal brackets in a
+            # plain-text send.
+            if include_signature:
+                fetched = await self._get_draft_text_for_send(source_draft_id, source_folder_id)  # type: ignore[arg-type]
+            else:
+                fetched = await self.get_email(source_draft_id, source_folder_id)  # type: ignore[arg-type]
             content = fetched["text"]
         assert content is not None  # narrowed by the mutual-exclusion check above
 
@@ -2701,6 +2733,36 @@ class ZohoClient:
         return normalize_email_content(
             data, strip_invisible_chars=self._strip_invisible_chars
         )
+
+    async def _get_draft_text_for_send(self, message_id: str, folder_id: str) -> dict:
+        """Like ``get_email``, but for ``send_email(source_draft_id=...)`` only.
+
+        Keeps an allowlisted ``<a>`` (the Haruharu case-study link) inline as ``[words](URL)``
+        markup, so ``_plaintext_to_safe_html`` rebuilds the SAME inline anchor at send time.
+        ``get_email`` itself is unchanged: its ``get_text(separator="\\n")`` puts an inline link on
+        its own lines, and re-sending that text split one sentence into three paragraphs
+        (2026-10-01, mooncat).
+        """
+        account_id = await self._get_account_id()
+        payload = await self._get(
+            f"{ZOHO_MAIL_BASE_URL}/accounts/{account_id}"
+            f"/folders/{folder_id}/messages/{message_id}/content"
+        )
+        try:
+            data = payload["data"]
+        except (KeyError, TypeError) as e:
+            raise ZohoAPIError(f"Malformed email response from Zoho: {e}") from e
+        result = normalize_email_content(
+            data, strip_invisible_chars=self._strip_invisible_chars
+        )
+        try:
+            text = _html_with_allowed_links_to_text(data["content"])
+            if self._strip_invisible_chars:
+                text = _strip_invisible_padding(text)
+        except MALFORMED_DATA_ERRORS as e:
+            raise ZohoAPIError(f"Malformed email content from Zoho: {e}") from e
+        result["text"] = text
+        return result
 
     async def list_attachments(self, message_id: str, folder_id: str) -> list[dict]:
         """List attachment metadata (name, size) for one email.

@@ -79,3 +79,28 @@ def test_quotes_and_apostrophes_still_not_entity_escaped_next_to_a_link():
     html = _plaintext_to_safe_html(f'Liza\'s "case" [case study]({URL}) here')
     assert "&#x27;" not in html and "&quot;" not in html
     assert f'<a href="{URL}">case study</a>' in html
+
+
+# --- Send-from-draft round trip (2026-10-01, mooncat): the link must stay inside its sentence ---
+from zoho_mcp.zoho.client import _html_with_allowed_links_to_text  # noqa: E402
+
+
+def test_draft_html_round_trips_with_the_link_inline_in_one_sentence():
+    draft_html = (
+        "<p>Hi Camilla,</p>"
+        f'<p>The full <a href="{URL}">case study</a> shows one video we delivered.</p>'
+        "<p>Ofentse Shuping | Monarc Media<br>monarcmediahq.com</p>"
+    )
+    text = _html_with_allowed_links_to_text(draft_html)
+    assert f"The full [case study]({URL}) shows one video we delivered." in text.split("\n")
+    assert _plaintext_to_safe_html(text) == (
+        "<p>Hi Camilla,</p>"
+        f'<p>The full <a href="{URL}">case study</a> shows one video we delivered.</p>'
+        "<p>Ofentse Shuping | Monarc Media<br>monarcmediahq.com</p>"
+    )
+
+
+def test_round_trip_never_revives_a_non_allowlisted_anchor():
+    text = _html_with_allowed_links_to_text('<p>See <a href="https://evil.example/x">this</a>.</p>')
+    assert "[this](" not in text and "evil.example" not in text
+    assert "<a" not in _plaintext_to_safe_html(text)
