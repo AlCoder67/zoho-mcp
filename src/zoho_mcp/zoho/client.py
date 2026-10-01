@@ -405,6 +405,24 @@ def _join_addresses(addresses: list[str] | None, *, required: bool = False) -> s
 
 _SIGNATURE_DOMAIN_RE = re.compile(r"[\w-]+(?:\.[\w-]+)+")
 
+# Owner-approved hyperlink targets (2026-10-01). The rich-text converter turns the authored markup
+# ``[words](URL)`` into a real <a href> ONLY when URL is exactly one of these. Any other URL, scheme,
+# or shape stays literal text, so caller content still cannot inject a link, a tag or an attribute.
+_ALLOWED_LINK_URLS = frozenset({"https://www.monarcmediahq.com/case-study-haruharu.html"})
+_LINK_MARKUP_RE = re.compile(r"\[([A-Za-z0-9][A-Za-z0-9 ,.'-]{0,60})\]\((https://[^\s()<>\"'\[\]]+)\)")
+
+
+def _linkify_allowed(escaped_line: str) -> str:
+    """Turn ``[words](URL)`` into an anchor, only for an allowlisted URL (input is already escaped)."""
+
+    def repl(m: "re.Match[str]") -> str:
+        words, url = m.group(1), m.group(2)
+        if url not in _ALLOWED_LINK_URLS:
+            return m.group(0)
+        return f'<a href="{url}">{words}</a>'
+
+    return _LINK_MARKUP_RE.sub(repl, escaped_line)
+
 
 def _plaintext_to_safe_html(content: str) -> str:
     """Convert plain text with bare "\\n" line breaks into safe HTML.
@@ -439,7 +457,9 @@ def _plaintext_to_safe_html(content: str) -> str:
 
     Escapes the input first (``html.escape``), so this never emits a
     caller-controlled tag -- the only markup in the output is the
-    ``<p>``/``<br>`` structure this function itself adds.
+    ``<p>``/``<br>`` structure this function itself adds, plus an ``<a href>``
+    for authored ``[words](URL)`` markup when URL is exactly an entry of
+    ``_ALLOWED_LINK_URLS`` (see ``_linkify_allowed``).
 
     Args:
         content: plain text, exactly as authored for the plaintext path.
@@ -472,7 +492,7 @@ def _plaintext_to_safe_html(content: str) -> str:
             paragraphs.append(f"<p>{line}<br>{next_line}</p>")
             i += 2
             continue
-        paragraphs.append(f"<p>{line}</p>")
+        paragraphs.append(f"<p>{_linkify_allowed(line)}</p>")
         i += 1
     return "".join(paragraphs)
 
