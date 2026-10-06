@@ -69,6 +69,11 @@ class FakeZohoClient:
         self.get_email_calls.append({"message_id": message_id, "folder_id": folder_id})
         return self.get_email_result
 
+    async def get_email_checked(self, message_id, folder_id):
+        # The MCP get_email tool must go through the folder-proving path.
+        self.get_email_calls.append({"message_id": message_id, "folder_id": folder_id, "checked": True})
+        return self.get_email_result
+
     async def list_attachments(self, message_id, folder_id):
         self.list_attachments_calls.append(
             {"message_id": message_id, "folder_id": folder_id}
@@ -264,7 +269,9 @@ async def test_get_email_delegates_to_client_with_message_and_folder_id():
 
     result = await get_email(client, message_id="msg-1", folder_id="folder-1")
 
-    assert client.get_email_calls == [{"message_id": "msg-1", "folder_id": "folder-1"}]
+    assert client.get_email_calls == [
+        {"message_id": "msg-1", "folder_id": "folder-1", "checked": True}
+    ]
     assert result == client.get_email_result
 
 

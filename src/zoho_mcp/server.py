@@ -264,7 +264,15 @@ def create_server(
 
     @mcp.tool(title="Read an email", annotations=_READ_ONLY)
     async def get_email(message_id: str, folder_id: str) -> dict:
-        """Fetch the full plain-text body of one email found via search_emails."""
+        """Fetch the full plain-text body of one email found via search_emails.
+
+        Returns {"id", "text", "folder_id", "folder_type"}. folder_type is
+        the folder the message REALLY is in (Sent, Drafts, Trash, ...), read
+        from Zoho rather than echoed from your folder_id. If the message is
+        not in the folder_id you pass, this raises instead of returning a
+        body, so a successful call is proof the message is in that folder.
+        To confirm something was sent, check folder_type == "Sent".
+        """
         return await mail_tools.get_email(
             client, message_id=message_id, folder_id=folder_id
         )

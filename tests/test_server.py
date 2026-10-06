@@ -19,6 +19,9 @@ class FakeZohoClient:
     async def get_email(self, message_id, folder_id):
         return {}
 
+    async def get_email_checked(self, message_id, folder_id):
+        return {}
+
     async def list_events(self, start, end, calendar_id=None):
         return []
 

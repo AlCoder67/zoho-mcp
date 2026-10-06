@@ -2734,6 +2734,64 @@ class ZohoClient:
             data, strip_invisible_chars=self._strip_invisible_chars
         )
 
+    async def get_email_checked(self, message_id: str, folder_id: str) -> dict:
+        """``get_email`` that proves where the message really is.
+
+        Zoho's ``/folders/{folderId}/messages/{id}/content`` ignores the folder
+        in its path, so ``get_email`` returns the same body for any folder id
+        and a caller cannot tell a Sent message from a Drafts or Trash one
+        (incident 149, 2026-10-06: a Drafts item was reported as sent and a CRM
+        row was closed on it). ``/details`` returns the real ``folderId``
+        whatever the path says, so it is read FIRST, and the body is only
+        returned when it matches the folder the caller claimed.
+
+        Returns ``{"id", "text", "folder_id", "folder_type"}``. ``folder_type``
+        (Sent, Drafts, Trash, ...) is ``None`` if the folder list could not be
+        read; ``folder_id`` is always the real one.
+
+        Only the MCP ``get_email`` tool uses this. ``get_email`` itself is
+        unchanged because the duplicate guard and ``send_email(source_draft_id)``
+        call it internally.
+
+        Raises:
+            ZohoAPIError: if the real folder cannot be determined, or it is not
+                the folder the caller named. Fails closed: no body is returned.
+        """
+        account_id = await self._get_account_id()
+        payload = await self._get(
+            f"{ZOHO_MAIL_BASE_URL}/accounts/{account_id}"
+            f"/folders/{folder_id}/messages/{message_id}/details"
+        )
+        try:
+            real_folder_id = str(payload["data"]["folderId"]).strip()
+        except MALFORMED_DATA_ERRORS as e:
+            raise ZohoAPIError(
+                f"Could not determine which folder message {message_id} is in: {e}"
+            ) from e
+        if not real_folder_id or real_folder_id == "None":
+            raise ZohoAPIError(
+                f"Could not determine which folder message {message_id} is in"
+            )
+        folder_types: dict[str, str] = {}
+        try:
+            folder_types = await get_folder_types(
+                self._token_manager, self._http_client, account_id
+            )
+        except ZohoAPIError:
+            folder_types = {}
+        folder_type = folder_types.get(real_folder_id)
+        if real_folder_id != str(folder_id).strip():
+            where = f"{real_folder_id} ({folder_type})" if folder_type else real_folder_id
+            raise ZohoAPIError(
+                f"Message {message_id} is not in folder {folder_id}: it is in "
+                f"folder {where}. Zoho returns a message body for any folder id, "
+                f"so only the real folder proves where a message is."
+            )
+        result = await self.get_email(message_id, folder_id)
+        result["folder_id"] = real_folder_id
+        result["folder_type"] = folder_type
+        return result
+
     async def _get_draft_text_for_send(self, message_id: str, folder_id: str) -> dict:
         """Like ``get_email``, but for ``send_email(source_draft_id=...)`` only.
 

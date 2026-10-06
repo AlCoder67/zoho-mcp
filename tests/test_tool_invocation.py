@@ -68,7 +68,8 @@ MAIL_CASES = [
     (
         "get_email",
         {"message_id": "m-1", "folder_id": "f-1"},
-        "get_email",
+        # The tool proves the real folder; plain get_email stays internal.
+        "get_email_checked",
         {"message_id": "m-1", "folder_id": "f-1"},
     ),
     (

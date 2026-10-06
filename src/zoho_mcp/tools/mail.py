@@ -108,12 +108,16 @@ async def get_email(client: ZohoClient, message_id: str, folder_id: str) -> dict
         folder_id: that same email's ``folder_id`` from ``search_emails``.
 
     Returns:
-        ``{"id": ..., "text": ...}`` with the body as plain text.
+        ``{"id", "text", "folder_id", "folder_type"}``: the body as plain text
+        plus the folder the message REALLY is in (``folder_type`` is e.g.
+        ``Sent``, ``Drafts`` or ``Trash``). Use it to prove where a message is.
 
     Raises:
-        ZohoAPIError: if the Zoho Mail API rejects or fails the request.
+        ZohoAPIError: if the Zoho Mail API rejects or fails the request, or if
+            the message is not in ``folder_id`` (Zoho itself would return the
+            body for any folder id, so this is checked here).
     """
-    return await client.get_email(message_id=message_id, folder_id=folder_id)
+    return await client.get_email_checked(message_id=message_id, folder_id=folder_id)
 
 
 async def list_attachments(client: ZohoClient, message_id: str, folder_id: str) -> dict:
