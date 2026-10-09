@@ -8,6 +8,7 @@ MCP tools happens here and only here.
 import difflib
 import email.header
 import email.parser
+import email.utils
 import html
 import json
 import re
@@ -1958,8 +1959,14 @@ class ZohoClient:
         mail_format: str | None = None,
         attachments: list[dict] | None = None,
         include_signature: bool = False,
+        in_reply_to: str | None = None,
+        references: str | None = None,
     ) -> dict:
         """Shared body-builder for ``create_draft`` and ``send_email``.
+
+        ``in_reply_to`` / ``references`` (Zoho's ``inReplyTo`` / ``refHeader`` keys) make the message a real reply
+        inside an existing thread, not just a message whose subject starts with "Re:". Both are set together or not
+        at all.
 
         Zoho uses one endpoint for both, distinguished *only* by
         ``mode: "draft"`` -- omitting it sends the message for real. That
@@ -1988,6 +1995,11 @@ class ZohoClient:
             body["mailFormat"] = mail_format
         if attachments:
             body["attachments"] = attachments
+        if (in_reply_to is None) != (references is None):
+            raise ZohoAPIError("in_reply_to and references must be given together")
+        if in_reply_to is not None:
+            body["inReplyTo"] = in_reply_to
+            body["refHeader"] = references
         # Verified live 2026-09-08: mailFormat="html" + includeSignature=True
         # together, on a REAL send (mode omitted), caused the account's
         # configured signature card (an inline image, added server-side) to
@@ -2010,6 +2022,52 @@ class ZohoClient:
         )
         return {"id": (payload.get("data") or {}).get("messageId", "")}
 
+    async def _thread_headers(
+        self, parent_message_id: str, to: list[str], subject: str
+    ) -> tuple[str, str]:
+        """The ``(In-Reply-To, References)`` values that put a new message in ``parent_message_id``'s thread.
+
+        The parent is read from Zoho (account-scoped ``originalmessage``), never typed by the caller. Fails closed:
+        the parent must carry a Message-ID, every recipient of the new message must be a party to the parent (exact
+        address match, so a follow-up can never be threaded under another brand's conversation), and the subject must
+        be the parent's subject apart from ``Re:`` prefixes. References is the parent's own References plus its
+        Message-ID (RFC 5322 3.6.4).
+
+        Raises:
+            ZohoAPIError: on any mismatch or when the parent cannot be read.
+        """
+        if not parent_message_id.strip():
+            raise ZohoAPIError("thread_parent_id must not be blank")
+        source = await self.get_email_source(parent_message_id)
+        headers = source.get("headers") or {}
+        parent_mid = (headers.get("message_id") or "").strip()
+        if not parent_mid:
+            raise ZohoAPIError(
+                f"Refusing to thread under message {parent_message_id}: it has no Message-ID header."
+            )
+        parties = {
+            addr.strip().lower()
+            for _name, addr in email.utils.getaddresses(
+                [headers[k] for k in ("from", "to", "cc", "bcc", "reply_to") if headers.get(k)]
+            )
+            if addr.strip()
+        }
+        for address in to:
+            if address.strip().lower() not in parties:
+                raise ZohoAPIError(
+                    f"Refusing to thread: {address} is not a party to message {parent_message_id}, so a reply to it "
+                    "would land in someone else's conversation."
+                )
+        parent_subject = headers.get("subject") or ""
+        if self._normalized_subject(subject) != self._normalized_subject(parent_subject):
+            raise ZohoAPIError(
+                "Refusing to thread: the subject must be the parent's subject (only a Re: prefix may differ). "
+                f"Parent subject: {parent_subject!r}."
+            )
+        existing = " ".join((headers.get("references") or "").split())
+        references = f"{existing} {parent_mid}".strip() if parent_mid not in existing else existing
+        return parent_mid, references
+
     async def create_draft(
         self,
         to: list[str],
@@ -2018,6 +2076,7 @@ class ZohoClient:
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
         rich_text: bool = True,
+        thread_parent_id: str | None = None,
     ) -> dict:
         """Save an email as a draft. Never sends, and is never gated.
 
@@ -2039,14 +2098,22 @@ class ZohoClient:
                 explicit per-call override precisely so the *default*
                 for every other caller stays the tested plaintext path;
                 it does not change what an omitted/default call does.
+            thread_parent_id: the id of the earlier message this draft continues (for an outreach follow-up, the Day 1
+                message in Sent). Makes the draft a real reply in that thread: In-Reply-To and References are read
+                from the parent by this call (see ``_thread_headers``). Every Day 4/9/16 follow-up must pass it; a
+                "Re:" subject alone does not thread. ``reply_draft`` cannot do this job because it refuses our own
+                Sent mail by design (2026-09-24 self-addressed-draft incident).
 
         Returns:
             ``{"id": ...}`` -- the new draft's message id.
 
         Raises:
-            ZohoAPIError: if no recipient is given, or the Zoho Mail API
-                rejects or fails the request.
+            ZohoAPIError: if no recipient is given, if the thread parent is unreadable or does not match the
+                recipients/subject, or the Zoho Mail API rejects or fails the request.
         """
+        in_reply_to = references = None
+        if thread_parent_id is not None:
+            in_reply_to, references = await self._thread_headers(thread_parent_id, to, subject)
         # mailFormat="plaintext" is load-bearing, not decorative. Zoho
         # defaults an omitted mailFormat to "html", but every caller of
         # this tool authors content as plain text with bare "\n" line
@@ -2075,6 +2142,8 @@ class ZohoClient:
                 bcc=bcc,
                 as_draft=True,
                 mail_format="html",
+                in_reply_to=in_reply_to,
+                references=references,
             )
         return await self._compose(
             to=to,
@@ -2084,6 +2153,8 @@ class ZohoClient:
             bcc=bcc,
             as_draft=True,
             mail_format="plaintext",
+            in_reply_to=in_reply_to,
+            references=references,
         )
 
     _RE_PREFIX_RE = re.compile(r"^(?:re|fwd?)\s*:\s*", re.IGNORECASE)
@@ -2336,6 +2407,18 @@ class ZohoClient:
             else:
                 fetched = await self.get_email(source_draft_id, source_folder_id)  # type: ignore[arg-type]
             content = fetched["text"]
+            # The draft's thread headers travel with it: a send rebuilds the message from the draft's text, which on
+            # its own would silently drop In-Reply-To/References and send the follow-up unthreaded. A read failure
+            # fails closed (nothing is sent).
+            draft_headers = (await self.get_email_source(source_draft_id)).get("headers") or {}  # type: ignore[arg-type]
+            thread_in_reply_to = (draft_headers.get("in_reply_to") or "").strip() or None
+            thread_references = " ".join((draft_headers.get("references") or "").split()) or None
+            if thread_in_reply_to and not thread_references:
+                thread_references = thread_in_reply_to
+            if thread_references and not thread_in_reply_to:
+                thread_in_reply_to = thread_references.split()[-1]
+        else:
+            thread_in_reply_to = thread_references = None
         assert content is not None  # narrowed by the mutual-exclusion check above
 
         if self._allow_auto_send and not force_duplicate:
@@ -2365,6 +2448,8 @@ class ZohoClient:
                 bcc=bcc,
                 as_draft=True,
                 mail_format="plaintext",
+                in_reply_to=thread_in_reply_to,
+                references=thread_references,
             )
             return {
                 **drafted,
@@ -2386,6 +2471,8 @@ class ZohoClient:
             as_draft=False,
             mail_format="html" if include_signature else None,
             include_signature=include_signature,
+            in_reply_to=thread_in_reply_to,
+            references=thread_references,
         )
         return {**sent, "sent": True}
 

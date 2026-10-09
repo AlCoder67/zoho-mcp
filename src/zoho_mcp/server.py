@@ -395,10 +395,17 @@ def create_server(
         cc: list[str] | None = None,
         bcc: list[str] | None = None,
         rich_text: bool = True,
+        thread_parent_id: str | None = None,
     ) -> dict:
         """Save an email as a draft in Zoho Mail. Does NOT send it.
 
         to: recipient addresses (at least one).
+        thread_parent_id (optional): id of the earlier message this draft
+        continues, e.g. the Day 1 email in Sent for an outreach follow-up.
+        Makes the draft a real reply in that thread (In-Reply-To and
+        References are read from that message); the subject must be its
+        subject (a Re: prefix is fine) and every recipient must be a party
+        to it. A "Re:" subject alone does not thread.
         subject / content: the subject line and message body, authored
         as plain text with bare "\\n" line breaks either way.
         cc / bcc (optional): additional recipients.
@@ -420,6 +427,7 @@ def create_server(
             cc=cc,
             bcc=bcc,
             rich_text=rich_text,
+            thread_parent_id=thread_parent_id,
         )
 
     @mcp.tool(title="Save a reply draft", annotations=_CREATE)

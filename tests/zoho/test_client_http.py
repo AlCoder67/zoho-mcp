@@ -115,6 +115,30 @@ def mock_reply_original_from(respx_mock, *, sender="brand@example.com", message_
     )
 
 
+def mock_draft_source(respx_mock, draft_id, *, in_reply_to=None, references=None):
+    """The draft's own `originalmessage` read send_email(source_draft_id=...) makes to carry its thread headers."""
+    lines = ["From: me@example.com", "To: rachel@example.com", "Subject: Re: Following up"]
+    if in_reply_to:
+        lines.append(f"In-Reply-To: {in_reply_to}")
+    if references:
+        lines.append(f"References: {references}")
+    return respx_mock.get(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/{draft_id}/originalmessage"
+    ).mock(return_value=httpx.Response(200, json={"data": {"content": "\r\n".join(lines) + "\r\n\r\nBody\r\n"}}))
+
+
+def mock_parent_source(respx_mock, parent_id, *, message_id="<day1@mail.zoho.com>", references=None,
+                       sender="me@example.com", to="rachel@example.com", subject="rachel co, the launch window"):
+    lines = [f"From: {sender}", f"To: {to}", f"Subject: {subject}"]
+    if message_id:
+        lines.append(f"Message-ID: {message_id}")
+    if references:
+        lines.append(f"References: {references}")
+    return respx_mock.get(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/{parent_id}/originalmessage"
+    ).mock(return_value=httpx.Response(200, json={"data": {"content": "\r\n".join(lines) + "\r\n\r\nBody\r\n"}}))
+
+
 def mock_pacific_accounts_endpoint(respx_mock):
     return respx_mock.get("https://mail.zoho.com/api/accounts").mock(
         return_value=httpx.Response(
@@ -4615,6 +4639,7 @@ async def test_send_email_with_source_draft_id_sends_the_drafts_real_content(
             },
         )
     )
+    mock_draft_source(respx_mock, "d-1")
     route = mock_compose_endpoints(respx_mock)
 
     result = await sending_client.send_email(
@@ -4655,6 +4680,7 @@ async def test_send_email_from_draft_keeps_the_case_study_link_inline_in_its_sen
             },
         )
     )
+    mock_draft_source(respx_mock, "d-2")
     route = mock_compose_endpoints(respx_mock)
 
     await sending_client.send_email(
@@ -4909,3 +4935,244 @@ async def test_send_email_duplicate_guard_does_not_apply_to_the_gated_draft_fall
     assert result["sent"] is False
     assert route.called
     assert not search_route.called
+
+
+# --- threading: create_draft(thread_parent_id=...) and the send path carrying a draft's thread headers ---
+#
+# 2026-10-06: every outreach follow-up went out with a "Re:" subject but no In-Reply-To/References, so recipients saw
+# a new conversation. reply_draft cannot thread under our own Sent mail (refused by design), so create_draft takes the
+# parent, reads its headers from Zoho, and send_email carries them from the draft into the real send.
+
+PARENT_SUBJECT = "Re: rachel co, the launch window"
+
+
+async def test_create_draft_without_thread_parent_sends_no_thread_keys(respx_mock, zoho_client):
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(to=["rachel@example.com"], subject="Hi", content="B")
+
+    sent = json.loads(route.calls.last.request.content)
+    assert "inReplyTo" not in sent and "refHeader" not in sent
+
+
+async def test_create_draft_with_thread_parent_sets_in_reply_to_and_references(respx_mock, zoho_client):
+    mock_parent_source(respx_mock, "sent-1")
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(to=["rachel@example.com"], subject=PARENT_SUBJECT, content="B", thread_parent_id="sent-1")
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["mode"] == "draft"
+    assert sent["inReplyTo"] == "<day1@mail.zoho.com>"
+    assert sent["refHeader"] == "<day1@mail.zoho.com>"
+
+
+async def test_create_draft_thread_references_extends_the_parents_chain(respx_mock, zoho_client):
+    mock_parent_source(respx_mock, "sent-4", message_id="<day4@mail.zoho.com>", references="<day1@mail.zoho.com>")
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(
+        to=["rachel@example.com"], subject="re: RE: Rachel Co, the launch window", content="B", thread_parent_id="sent-4"
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["inReplyTo"] == "<day4@mail.zoho.com>"
+    assert sent["refHeader"] == "<day1@mail.zoho.com> <day4@mail.zoho.com>"
+
+
+async def test_create_draft_thread_does_not_repeat_the_parent_in_references(respx_mock, zoho_client):
+    mock_parent_source(respx_mock, "sent-4", message_id="<day4@mail.zoho.com>", references="<day1@mail.zoho.com> <day4@mail.zoho.com>")
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(to=["rachel@example.com"], subject=PARENT_SUBJECT, content="B", thread_parent_id="sent-4")
+
+    assert json.loads(route.calls.last.request.content)["refHeader"] == "<day1@mail.zoho.com> <day4@mail.zoho.com>"
+
+
+async def test_create_draft_thread_refuses_a_recipient_who_is_not_a_party_to_the_parent(respx_mock, zoho_client):
+    mock_parent_source(respx_mock, "sent-1", to="rachel@example.com")
+    route = mock_compose_endpoints(respx_mock)
+
+    with pytest.raises(ZohoAPIError, match="not a party"):
+        await zoho_client.create_draft(to=["someone-else@example.com"], subject=PARENT_SUBJECT, content="B", thread_parent_id="sent-1")
+
+    assert not route.called
+
+
+async def test_create_draft_thread_party_check_is_an_exact_address_match(respx_mock, zoho_client):
+    mock_parent_source(respx_mock, "sent-1", to="Jo Ann <joann@example.com>")
+    route = mock_compose_endpoints(respx_mock)
+
+    with pytest.raises(ZohoAPIError, match="not a party"):
+        await zoho_client.create_draft(to=["ann@example.com"], subject=PARENT_SUBJECT, content="B", thread_parent_id="sent-1")
+
+    assert not route.called
+
+
+async def test_create_draft_thread_party_check_reads_display_name_addresses(respx_mock, zoho_client):
+    mock_parent_source(respx_mock, "sent-1", to='"Rachel R" <Rachel@Example.com>')
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(to=["rachel@example.com"], subject=PARENT_SUBJECT, content="B", thread_parent_id="sent-1")
+
+    assert json.loads(route.calls.last.request.content)["inReplyTo"] == "<day1@mail.zoho.com>"
+
+
+async def test_create_draft_thread_refuses_a_different_subject(respx_mock, zoho_client):
+    mock_parent_source(respx_mock, "sent-1")
+    route = mock_compose_endpoints(respx_mock)
+
+    with pytest.raises(ZohoAPIError, match="subject must be the parent"):
+        await zoho_client.create_draft(to=["rachel@example.com"], subject="Re: a different subject", content="B", thread_parent_id="sent-1")
+
+    assert not route.called
+
+
+async def test_create_draft_thread_refuses_a_parent_without_a_message_id(respx_mock, zoho_client):
+    mock_parent_source(respx_mock, "sent-1", message_id=None)
+    route = mock_compose_endpoints(respx_mock)
+
+    with pytest.raises(ZohoAPIError, match="no Message-ID"):
+        await zoho_client.create_draft(to=["rachel@example.com"], subject=PARENT_SUBJECT, content="B", thread_parent_id="sent-1")
+
+    assert not route.called
+
+
+async def test_create_draft_thread_refuses_a_blank_parent_id(respx_mock, zoho_client):
+    route = mock_compose_endpoints(respx_mock)
+
+    with pytest.raises(ZohoAPIError, match="must not be blank"):
+        await zoho_client.create_draft(to=["rachel@example.com"], subject="Re: x", content="B", thread_parent_id="  ")
+
+    assert not route.called
+
+
+async def test_create_draft_thread_unreadable_parent_creates_no_draft(respx_mock, zoho_client):
+    respx_mock.get(f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/sent-1/originalmessage").mock(
+        return_value=httpx.Response(404, json={"data": {"errorCode": "INVALID_MESSAGE"}})
+    )
+    route = mock_compose_endpoints(respx_mock)
+
+    with pytest.raises(ZohoAPIError):
+        await zoho_client.create_draft(to=["rachel@example.com"], subject=PARENT_SUBJECT, content="B", thread_parent_id="sent-1")
+
+    assert not route.called
+
+
+async def test_create_draft_thread_plain_text_path_also_threads(respx_mock, zoho_client):
+    mock_parent_source(respx_mock, "sent-1")
+    route = mock_compose_endpoints(respx_mock)
+
+    await zoho_client.create_draft(
+        to=["rachel@example.com"], subject=PARENT_SUBJECT, content="B", rich_text=False, thread_parent_id="sent-1"
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["mailFormat"] == "plaintext" and sent["inReplyTo"] == "<day1@mail.zoho.com>"
+
+
+async def test_compose_refuses_half_a_thread(respx_mock, zoho_client):
+    route = mock_compose_endpoints(respx_mock)
+
+    with pytest.raises(ZohoAPIError, match="together"):
+        await zoho_client._compose(
+            to=["a@example.com"], subject="Re: x", content="B", cc=None, bcc=None, as_draft=True, in_reply_to="<a@b>"
+        )
+
+    assert not route.called
+
+
+def _mock_draft_content(respx_mock, draft_id="d-9", html="<p>Hi Rachel</p>"):
+    respx_mock.get(
+        f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/folders/drafts-folder/messages/{draft_id}/content"
+    ).mock(return_value=httpx.Response(200, json={"data": {"messageId": draft_id, "content": html}}))
+
+
+async def test_send_email_from_a_threaded_draft_carries_the_thread_headers(respx_mock, sending_client):
+    mock_no_duplicate_sent(respx_mock)
+    _mock_draft_content(respx_mock)
+    mock_draft_source(respx_mock, "d-9", in_reply_to="<day1@mail.zoho.com>", references="<day1@mail.zoho.com>")
+    route = mock_compose_endpoints(respx_mock)
+
+    result = await sending_client.send_email(
+        to=["rachel@example.com"], subject="Re: following up", source_draft_id="d-9", source_folder_id="drafts-folder"
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert result["sent"] is True and "mode" not in sent
+    assert sent["inReplyTo"] == "<day1@mail.zoho.com>" and sent["refHeader"] == "<day1@mail.zoho.com>"
+
+
+async def test_send_email_from_an_unthreaded_draft_sends_no_thread_keys(respx_mock, sending_client):
+    mock_no_duplicate_sent(respx_mock)
+    _mock_draft_content(respx_mock)
+    mock_draft_source(respx_mock, "d-9")
+    route = mock_compose_endpoints(respx_mock)
+
+    await sending_client.send_email(to=["rachel@example.com"], subject="Hi", source_draft_id="d-9", source_folder_id="drafts-folder")
+
+    sent = json.loads(route.calls.last.request.content)
+    assert "inReplyTo" not in sent and "refHeader" not in sent
+
+
+async def test_send_email_with_only_references_on_the_draft_derives_in_reply_to(respx_mock, sending_client):
+    mock_no_duplicate_sent(respx_mock)
+    _mock_draft_content(respx_mock)
+    mock_draft_source(respx_mock, "d-9", references="<day1@mail.zoho.com> <day4@mail.zoho.com>")
+    route = mock_compose_endpoints(respx_mock)
+
+    await sending_client.send_email(to=["rachel@example.com"], subject="Re: x", source_draft_id="d-9", source_folder_id="drafts-folder")
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["inReplyTo"] == "<day4@mail.zoho.com>"
+    assert sent["refHeader"] == "<day1@mail.zoho.com> <day4@mail.zoho.com>"
+
+
+async def test_send_email_with_only_in_reply_to_on_the_draft_derives_references(respx_mock, sending_client):
+    mock_no_duplicate_sent(respx_mock)
+    _mock_draft_content(respx_mock)
+    mock_draft_source(respx_mock, "d-9", in_reply_to="<day1@mail.zoho.com>")
+    route = mock_compose_endpoints(respx_mock)
+
+    await sending_client.send_email(to=["rachel@example.com"], subject="Re: x", source_draft_id="d-9", source_folder_id="drafts-folder")
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["inReplyTo"] == "<day1@mail.zoho.com>" and sent["refHeader"] == "<day1@mail.zoho.com>"
+
+
+async def test_send_email_gated_fallback_draft_keeps_the_thread_headers(respx_mock, zoho_client):
+    _mock_draft_content(respx_mock)
+    mock_draft_source(respx_mock, "d-9", in_reply_to="<day1@mail.zoho.com>", references="<day1@mail.zoho.com>")
+    route = mock_compose_endpoints(respx_mock)
+
+    result = await zoho_client.send_email(
+        to=["rachel@example.com"], subject="Re: x", source_draft_id="d-9", source_folder_id="drafts-folder"
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert result["sent"] is False and sent["mode"] == "draft"
+    assert sent["inReplyTo"] == "<day1@mail.zoho.com>"
+
+
+async def test_send_email_from_draft_fails_closed_when_the_drafts_headers_cannot_be_read(respx_mock, sending_client):
+    mock_no_duplicate_sent(respx_mock)
+    _mock_draft_content(respx_mock)
+    respx_mock.get(f"https://mail.zoho.com/api/accounts/{ACCOUNT_ID}/messages/d-9/originalmessage").mock(
+        return_value=httpx.Response(500, json={})
+    )
+    route = mock_compose_endpoints(respx_mock)
+
+    with pytest.raises(ZohoAPIError):
+        await sending_client.send_email(to=["rachel@example.com"], subject="Hi", source_draft_id="d-9", source_folder_id="drafts-folder")
+
+    assert not route.called
+
+
+async def test_send_email_with_typed_content_never_threads(respx_mock, sending_client):
+    mock_no_duplicate_sent(respx_mock)
+    route = mock_compose_endpoints(respx_mock)
+
+    await sending_client.send_email(to=["rachel@example.com"], subject="Hi", content="B")
+
+    sent = json.loads(route.calls.last.request.content)
+    assert "inReplyTo" not in sent and "refHeader" not in sent

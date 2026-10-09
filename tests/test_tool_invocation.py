@@ -110,6 +110,21 @@ MAIL_CASES = [
             "cc": ["c@example.com"],
             "bcc": ["d@example.com"],
             "rich_text": True,
+            "thread_parent_id": None,
+        },
+    ),
+    (
+        "create_draft",
+        {"to": ["a@example.com"], "subject": "Re: S", "content": "B", "thread_parent_id": "sent-day1"},
+        "create_draft",
+        {
+            "to": ["a@example.com"],
+            "subject": "Re: S",
+            "content": "B",
+            "cc": None,
+            "bcc": None,
+            "rich_text": True,
+            "thread_parent_id": "sent-day1",
         },
     ),
     (

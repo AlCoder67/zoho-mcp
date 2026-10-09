@@ -92,7 +92,7 @@ class FakeZohoClient:
         self.list_signatures_calls += 1
         return self.list_signatures_result
 
-    async def create_draft(self, to, subject, content, cc=None, bcc=None, rich_text=False):
+    async def create_draft(self, to, subject, content, cc=None, bcc=None, rich_text=False, thread_parent_id=None):
         self.create_draft_calls.append(
             {
                 "to": to,
@@ -101,6 +101,7 @@ class FakeZohoClient:
                 "cc": cc,
                 "bcc": bcc,
                 "rich_text": rich_text,
+                "thread_parent_id": thread_parent_id,
             }
         )
         return self.compose_result
@@ -426,9 +427,18 @@ async def test_create_draft_delegates_to_client():
             "cc": ["c@x.com"],
             "bcc": None,
             "rich_text": True,
+            "thread_parent_id": None,
         }
     ]
     assert result == client.compose_result
+
+
+async def test_create_draft_passes_thread_parent_id_through():
+    client = FakeZohoClient()
+
+    await create_draft(client, to=["a@x.com"], subject="Re: S", content="B", thread_parent_id="sent-1")
+
+    assert client.create_draft_calls[0]["thread_parent_id"] == "sent-1"
 
 
 async def test_create_draft_passes_rich_text_through():

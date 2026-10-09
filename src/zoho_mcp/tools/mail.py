@@ -231,6 +231,7 @@ async def create_draft(
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
     rich_text: bool = True,
+    thread_parent_id: str | None = None,
 ) -> dict:
     """Save an email as a draft. Never sends.
 
@@ -238,6 +239,8 @@ async def create_draft(
         client: injected Zoho client.
         to: recipient addresses (at least one required).
         subject: the subject line.
+        thread_parent_id: id of the earlier message this draft continues (an outreach follow-up passes its Day 1 Sent
+            message); makes it a real reply in that thread. See ``ZohoClient.create_draft``.
         content: the message body, authored as plain text with bare
             "\\n" line breaks -- true whether or not ``rich_text`` is set.
         cc/bcc: optional additional recipients.
@@ -257,7 +260,13 @@ async def create_draft(
             rejects or fails the request.
     """
     return await client.create_draft(
-        to=to, subject=subject, content=content, cc=cc, bcc=bcc, rich_text=rich_text
+        to=to,
+        subject=subject,
+        content=content,
+        cc=cc,
+        bcc=bcc,
+        rich_text=rich_text,
+        thread_parent_id=thread_parent_id,
     )
 
 
