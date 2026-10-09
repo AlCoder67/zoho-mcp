@@ -428,6 +428,12 @@ async def test_no_tool_can_turn_sending_on():
         )
 
 
+async def test_send_email_schema_cannot_offer_owner_override():
+    server = build_server()
+    send = next(tool for tool in await server.list_tools() if tool.name == "send_email")
+    assert "override_reason" not in send.inputSchema.get("properties", {})
+
+
 async def test_send_email_is_annotated_as_irreversible_and_outward_facing():
     # send_email is the only tool that reaches a third party and cannot be
     # undone; its annotations must say so, so clients can gate it.

@@ -563,6 +563,13 @@ def create_server(
         genuinely deliberate (confirmed with the user, not inferred), set
         force_duplicate=True and call again -- don't work around it by
         editing the subject line to dodge the match.
+
+        From partnerships@monarcmediahq.com only: a real send to any recipient
+        whose domain (or a parent domain) is on the Microsoft 365 deferred ledger,
+        has Microsoft 365 MX, or cannot be verified is REFUSED before anything is
+        sent; so is a send whose sender address cannot be determined. Treat the
+        refusal as a hold. No call-supplied override is accepted.
+        Mail from any other address is unaffected.
         """
         return await mail_tools.send_email(
             client,

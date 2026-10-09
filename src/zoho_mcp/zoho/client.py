@@ -5,6 +5,7 @@ bodies, event timestamps) into the compact, LLM-facing shapes used by the
 MCP tools happens here and only here.
 """
 
+import asyncio
 import difflib
 import email.header
 import email.parser
@@ -20,6 +21,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from zoho_mcp.zoho.auth import ZohoTokenManager
+from zoho_mcp.zoho.send_guard import SendGuard, SendGuardRefusal
 
 ZOHO_EVENT_RANGE_REQUEST_FORMAT = "%Y%m%dT%H%M%SZ"
 ZOHO_MAIL_BASE_URL = "https://mail.zoho.com/api"
@@ -222,6 +224,14 @@ _INVISIBLE_PADDING_CHARS = frozenset(
 
 class ZohoAPIError(Exception):
     """Raised when a Zoho Mail/Calendar API call fails or is rejected."""
+
+
+# Any write to the account's message collection or to one message. Zoho sends
+# for real whenever such a body lacks ``mode: "draft"`` (see ``_compose``), so
+# this pattern -- not any one tool -- is where the Monarc send guard is enforced.
+_MAIL_MESSAGE_WRITE = re.compile(
+    re.escape(ZOHO_MAIL_BASE_URL) + r"/accounts/[^/]+/messages(?:/[^/?#]+)?/?(?:[?#].*)?$"
+)
 
 
 # Everything a normalizer can hit when Zoho's payload isn't what it claims: a
@@ -1653,6 +1663,7 @@ class ZohoClient:
         strip_invisible_chars: bool = False,
         allow_auto_send: bool = False,
         from_address: str | None = None,
+        send_guard: SendGuard | None = None,
     ) -> None:
         self._token_manager = token_manager
         self._http_client = http_client
@@ -1668,6 +1679,10 @@ class ZohoClient:
         # code path (or injected instruction reaching a tool) can route
         # around it.
         self._allow_auto_send = allow_auto_send
+        # Monarc M365/ledger recipient guard. Enforced in _post/_put on every
+        # real (non-draft) message write; a no-op unless the message is from
+        # partnerships@monarcmediahq.com. See send_guard.py.
+        self._send_guard = send_guard if send_guard is not None else SendGuard()
         self._mailbox_timezone_cache: str | None = None
         # An explicit override skips the live mailboxAddress lookup
         # entirely -- see ``_get_from_address``. Real-world need: an
@@ -1684,12 +1699,44 @@ class ZohoClient:
         token = await self._token_manager.get_access_token()
         return await zoho_authenticated_get(self._http_client, url, token, params)
 
+    async def _enforce_send_guard(self, url: str, json_body: dict | None) -> None:
+        """Refuse a real send from the guarded mailbox to an M365/ledger recipient.
+
+        Runs before any token is fetched or byte is sent. Drafts (``mode: "draft"``)
+        and every non-message URL pass untouched.
+        """
+        if not _MAIL_MESSAGE_WRITE.match(url):
+            return
+        body = json_body if isinstance(json_body, dict) else {}
+        if body.get("mode") == "draft":
+            return
+        from_address = body.get("fromAddress")
+        if from_address is None or from_address == "":
+            # No explicit sender on the write: learn the account's own address.
+            # Any failure here must refuse, never fall through as "unguarded".
+            try:
+                from_address = await self._get_from_address()
+            except Exception as e:  # noqa: BLE001 - lookup failure refuses the send
+                raise ZohoAPIError(
+                    "send refused by the Monarc M365 recipient guard: the sender "
+                    f"address could not be determined ({type(e).__name__}). "
+                    "Nothing was sent. This is a hold, not an error to work around."
+                ) from e
+        # A reply/forward action without toAddress lets Zoho derive the
+        # recipients server-side: the guard cannot see them, so it refuses.
+        fields = [body.get(k) for k in ("toAddress", "ccAddress", "bccAddress")] if body.get("toAddress") else None
+        try:
+            await asyncio.to_thread(self._send_guard.check, from_address, fields)
+        except SendGuardRefusal as e:
+            raise ZohoAPIError(str(e)) from e
+
     async def _post(
         self,
         url: str,
         params: dict | None = None,
         json_body: dict | None = None,
     ) -> dict:
+        await self._enforce_send_guard(url, json_body)
         token = await self._token_manager.get_access_token()
         return await zoho_authenticated_post(
             self._http_client, url, token, params, json_body
@@ -1701,6 +1748,7 @@ class ZohoClient:
         params: dict | None = None,
         json_body: dict | None = None,
     ) -> dict:
+        await self._enforce_send_guard(url, json_body)
         token = await self._token_manager.get_access_token()
         return await zoho_authenticated_put(
             self._http_client, url, token, params, json_body
@@ -2016,10 +2064,8 @@ class ZohoClient:
         _add_optional_recipients(body, cc=cc, bcc=bcc)
 
         account_id = await self._get_account_id()
-        payload = await self._post(
-            f"{ZOHO_MAIL_BASE_URL}/accounts/{account_id}/messages",
-            json_body=body,
-        )
+        url = f"{ZOHO_MAIL_BASE_URL}/accounts/{account_id}/messages"
+        payload = await self._post(url, json_body=body)
         return {"id": (payload.get("data") or {}).get("messageId", "")}
 
     async def _thread_headers(
@@ -2305,6 +2351,11 @@ class ZohoClient:
         force_duplicate: bool = False,
     ) -> dict:
         """Send an email, or save it as a draft when sending is disabled.
+
+        Monarc M365 recipient guard: a real send from
+        partnerships@monarcmediahq.com to any To/Cc/Bcc domain on the shared
+        deferred ledger or with Microsoft 365 MX (or unverifiable DNS) is refused
+        with ZohoAPIError before anything is sent. No call-supplied override exists.
 
         Sending is irreversible and outward-facing, so it's off by
         default: the client must be constructed with
